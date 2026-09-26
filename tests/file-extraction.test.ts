@@ -92,5 +92,7 @@ test("returns empty text for a valid PDF without extractable text", async () => 
 test("detects unsupported, missing, and empty extraction inputs", async () => {
   assert.equal(getFileExtension("cv.rtf", "application/rtf"), null);
   assert.equal(getFileExtension("cv.pdf", "application/octet-stream"), "pdf");
+  assert.equal(getFileExtension("payload.exe", "application/pdf"), null);
+  assert.equal(getFileExtension("cv.pdf", "image/jpeg"), null);
   assert.equal(await extractTextFromBuffer(Buffer.from("   \n\n  "), "txt"), "");
 });

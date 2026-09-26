@@ -61,6 +61,7 @@ export type InternalQuality = {
 };
 
 export type CvAnalysis = {
+  cover_letter: string | null;
   candidate_facts: CandidateFacts;
   job_analysis: JobAnalysis;
   job_matches: JobMatch[];
@@ -128,8 +129,12 @@ function parseJobAnalysis(value: unknown): JobAnalysis {
   };
 }
 
-export function parseCvAnalysis(value: unknown): CvAnalysis {
+export function parseCvAnalysis(value: unknown, includeCoverLetter = false): CvAnalysis {
   if (!isRecord(value)) throw new Error("AI analysis must be an object.");
+  const coverLetter = value.cover_letter;
+  if (includeCoverLetter && (typeof coverLetter !== "string" || !coverLetter.trim())) {
+    throw new Error("Analysis is missing the requested cover letter.");
+  }
   const matches = value.job_matches;
   if (!Array.isArray(matches)) throw new Error("Analysis job_matches must be an array.");
   const jobMatches = matches.map((item) => {
@@ -153,6 +158,7 @@ export function parseCvAnalysis(value: unknown): CvAnalysis {
   }
   const strategy = value.cv_strategy;
   return {
+    cover_letter: includeCoverLetter ? String(coverLetter).trim() : null,
     candidate_facts: parseCandidateFacts(value.candidate_facts),
     job_analysis: parseJobAnalysis(value.job_analysis),
     job_matches: jobMatches,

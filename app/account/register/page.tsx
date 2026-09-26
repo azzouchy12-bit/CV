@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import { getSupabaseBrowserClient } from "@/lib/supabase-client";
+import { safeInternalRedirect } from "@/lib/auth-redirect";
+import { getSavedClientLanguage } from "@/lib/client-preferences";
 
 type Language = "ar" | "fr" | "en";
 
@@ -19,13 +21,13 @@ const copy = {
     creating: "Creating account…",
     existing: "Already have an account?",
     signIn: "Sign in",
-    checkTitle: "Check your email",
-    sentTo: "We sent a verification link to:",
-    checkBody: "Open the link in your inbox to activate your CVUp account.",
+    checkTitle: "Confirm your account",
+    sentTo: "If confirmation is required, Supabase will send instructions to:",
+    checkBody: "A successful signup response does not confirm email delivery. Delivery depends on the project's email settings. If you already have an account, sign in instead.",
     spam: "If you can’t find it, check Spam or Promotions.",
     resend: "Resend verification email",
     resending: "Sending…",
-    resent: "A new verification email has been sent.",
+    resent: "If confirmation is required, Supabase accepted the resend request. This does not confirm delivery.",
     change: "Change email",
     generic: "We couldn't create your account. Please try again.",
     emailError: "We couldn't send the verification email. Please try again.",
@@ -42,13 +44,13 @@ const copy = {
     creating: "Création du compte…",
     existing: "Vous avez déjà un compte ?",
     signIn: "Se connecter",
-    checkTitle: "Vérifiez votre e-mail",
-    sentTo: "Nous avons envoyé un lien de vérification à :",
-    checkBody: "Ouvrez le lien reçu pour activer votre compte CVUp.",
+    checkTitle: "Confirmez votre compte",
+    sentTo: "Si une confirmation est requise, Supabase enverra les instructions à :",
+    checkBody: "Une réponse d’inscription réussie ne confirme pas la livraison de l’e-mail. Celle-ci dépend des paramètres e-mail du projet. Si vous avez déjà un compte, connectez-vous.",
     spam: "Si vous ne le trouvez pas, vérifiez les dossiers Spam ou Promotions.",
     resend: "Renvoyer l’e-mail de vérification",
     resending: "Envoi…",
-    resent: "Un nouvel e-mail de vérification a été envoyé.",
+    resent: "Si une confirmation est requise, Supabase a accepté la nouvelle demande. Cela ne confirme pas la livraison.",
     change: "Modifier l’e-mail",
     generic: "Impossible de créer votre compte. Veuillez réessayer.",
     emailError: "Impossible d’envoyer l’e-mail de vérification. Veuillez réessayer.",
@@ -65,13 +67,13 @@ const copy = {
     creating: "جارٍ إنشاء الحساب…",
     existing: "لديك حساب بالفعل؟",
     signIn: "تسجيل الدخول",
-    checkTitle: "تحقق من بريدك الإلكتروني",
-    sentTo: "أرسلنا رابط التحقق إلى:",
-    checkBody: "افتح الرابط في بريدك لتفعيل حساب CVUp.",
+    checkTitle: "تأكيد الحساب",
+    sentTo: "إذا كان تأكيد البريد مطلوبًا، فسيحاول Supabase إرسال التعليمات إلى:",
+    checkBody: "نجاح طلب التسجيل لا يؤكد وصول البريد الإلكتروني. يعتمد الإرسال على إعدادات البريد في المشروع. إذا كان لديك حساب بالفعل، فسجّل الدخول.",
     spam: "إذا لم تجده، تحقق من البريد غير المرغوب فيه أو تبويب العروض الترويجية.",
     resend: "إعادة إرسال رسالة التحقق",
     resending: "جارٍ الإرسال…",
-    resent: "تم إرسال رسالة تحقق جديدة.",
+    resent: "إذا كان التأكيد مطلوبًا، فقد قبل Supabase طلب إعادة الإرسال. هذا لا يؤكد وصول الرسالة.",
     change: "تغيير البريد الإلكتروني",
     generic: "تعذر إنشاء الحساب. حاول مرة أخرى.",
     emailError: "تعذر إرسال رسالة التحقق. حاول مرة أخرى.",
@@ -80,10 +82,6 @@ const copy = {
 
 function GoogleIcon() {
   return <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5"><path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41Z"/><path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.62-2.36l-3.24-2.54c-.9.6-2.05.96-3.38.96-2.61 0-4.82-1.76-5.61-4.13H3.04v2.62A10 10 0 0 0 12 22Z"/><path fill="#FBBC05" d="M6.39 13.93A6.02 6.02 0 0 1 6.08 12c0-.67.11-1.32.31-1.93V7.45H3.04A10 10 0 0 0 2 12c0 1.61.38 3.14 1.04 4.55l3.35-2.62Z"/><path fill="#EA4335" d="M12 5.94c1.47 0 2.79.5 3.83 1.5l2.87-2.88A9.62 9.62 0 0 0 12 2a10 10 0 0 0-8.96 5.45l3.35 2.62C7.18 7.7 9.39 5.94 12 5.94Z"/></svg>;
-}
-
-function safeNext(value: string | null) {
-  return value && value.startsWith("/") && !value.startsWith("//") ? value : "/account";
 }
 
 export default function Register() {
@@ -98,13 +96,12 @@ export default function Register() {
   const [verifiedState, setVerifiedState] = useState(false);
 
   useEffect(() => {
-    const resolvedNext = safeNext(new URLSearchParams(window.location.search).get("next"));
-    setNext(resolvedNext);
-    const stored = window.localStorage.getItem("cvup_language");
-    if (stored === "ar" || stored === "fr" || stored === "en") setLanguage(stored);
+    const resolvedNext = safeInternalRedirect(new URLSearchParams(window.location.search).get("next"), "/account", window.location.origin);
+    const currentLanguage: Language = getSavedClientLanguage();
     getSupabaseBrowserClient().auth.getSession().then(({ data }) => {
+      setNext(resolvedNext);
       if (data.session) window.location.replace(resolvedNext);
-      else setChecking(false);
+      else { setLanguage(currentLanguage); setChecking(false); }
     });
   }, []);
 
@@ -176,7 +173,7 @@ export default function Register() {
   const rtl = language === "ar";
 
   return (
-    <main dir={rtl ? "rtl" : "ltr"} className="grid min-h-screen place-items-center bg-[#f7f9f4] p-4 text-[#102019] md:p-6">
+    <main lang={language} dir={rtl ? "rtl" : "ltr"} className="grid min-h-screen place-items-center bg-[#f7f9f4] p-4 text-[#102019] md:p-6">
       <section className="w-full max-w-[520px] rounded-[28px] border border-[#dfe7df] bg-white p-6 shadow-[0_18px_55px_rgba(16,32,25,.06)] md:p-10">
         <div className="flex items-center justify-between gap-4">
           <Link href="/" className="text-2xl font-bold tracking-tight">CVUp</Link>

@@ -287,6 +287,7 @@ export function CvupClientGuards() {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         const language = getCurrentLanguage();
+        ensureInlineValidation(language);
         ensureFullNameLatinRequirement(language);
         ensureArabicNameField(language);
         ensureEditPolicyNote(language);

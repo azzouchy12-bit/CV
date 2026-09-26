@@ -1,7 +1,7 @@
 import { PDFParse } from "pdf-parse";
 import mammoth from "mammoth";
 
-export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_FILE_BYTES = 50 * 1024 * 1024;
 export const MAX_EXTRACTED_CHARS = 120_000;
 
 export function normalizeExtractedText(value: string) {
@@ -18,9 +18,16 @@ export function normalizeExtractedText(value: string) {
 export function getFileExtension(fileName: string | null | undefined, contentType: string | null | undefined) {
   const name = fileName?.toLowerCase() ?? "";
   const type = contentType?.toLowerCase().split(";")[0] ?? "";
-  if (type === "application/pdf" || name.endsWith(".pdf")) return "pdf";
-  if (type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || name.endsWith(".docx")) return "docx";
-  if (type === "text/plain" || name.endsWith(".txt")) return "txt";
+  const genericType = !type || type === "application/octet-stream";
+  if (name) {
+    if (name.endsWith(".pdf") && (genericType || type === "application/pdf")) return "pdf";
+    if (name.endsWith(".docx") && (genericType || type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document")) return "docx";
+    if (name.endsWith(".txt") && (genericType || type === "text/plain")) return "txt";
+    return null;
+  }
+  if (type === "application/pdf") return "pdf";
+  if (type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") return "docx";
+  if (type === "text/plain") return "txt";
   return null;
 }
 

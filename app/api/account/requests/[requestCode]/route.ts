@@ -1,42 +1,21 @@
-import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { createServerClient } from "@supabase/ssr";
 import { getSupabaseServerClient } from "@/lib/supabase";
 import { createRequestSubmissionToken } from "@/lib/request-submission-token";
+import { editableClientRequestStatuses, isClientRequestEditable } from "@/lib/client-request-editability";
+import { getAuthenticatedAccountUser } from "@/lib/account-auth";
+import { calculateRequestPrice } from "@/lib/pricing";
+import { shouldGenerateCoverLetter } from "@/lib/request-deliverables";
+import { hasAtLeastThreeDistinctSpokenLanguages } from "@/lib/spoken-languages";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-
-const editableStatuses = new Set(["NEW", "DRAFT", "PENDING"]);
-
-async function getAuthenticatedUser() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-  const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim();
-  if (!supabaseUrl || !publishableKey) return null;
-
-  const cookieStore = await cookies();
-  const authClient = createServerClient(supabaseUrl, publishableKey, {
-    cookies: {
-      getAll: () => cookieStore.getAll(),
-      setAll: () => {},
-    },
-  });
-  const { data: { user } } = await authClient.auth.getUser();
-  return user ?? null;
-}
-
-function isEditableRequest(request: Record<string, unknown>) {
-  if (request.payment_status === "PAID") return false;
-  const status = String(request.status || "NEW");
-  return editableStatuses.has(status) || !["IN_PROGRESS", "READY", "DELIVERED", "COMPLETED"].includes(status);
-}
 
 function safeArray(value: unknown) {
   return Array.isArray(value) ? value : [];
 }
 
 export async function GET(_request: Request, context: { params: Promise<{ requestCode: string }> }) {
-  const user = await getAuthenticatedUser();
+  const user = await getAuthenticatedAccountUser();
   if (!user) return NextResponse.json({ error: "Authentication required." }, { status: 401 });
 
   const { requestCode } = await context.params;
@@ -52,7 +31,7 @@ export async function GET(_request: Request, context: { params: Promise<{ reques
     return NextResponse.json({ error: "Request not found." }, { status: 404 });
   }
 
-  const editable = isEditableRequest(data as Record<string, unknown>);
+  const editable = isClientRequestEditable(data);
   const submissionToken = editable
     ? await createRequestSubmissionToken(String(data.id), String(data.request_code))
     : null;
@@ -65,19 +44,22 @@ export async function GET(_request: Request, context: { params: Promise<{ reques
 }
 
 export async function PATCH(request: Request, context: { params: Promise<{ requestCode: string }> }) {
-  const user = await getAuthenticatedUser();
+  const user = await getAuthenticatedAccountUser();
   if (!user) return NextResponse.json({ error: "Authentication required." }, { status: 401 });
 
   const { requestCode } = await context.params;
-  const body = await request.json();
+  const body = await request.json().catch(() => null);
   const form = body?.form;
 
-  if (!form || typeof form !== "object") {
+  if (!form || typeof form !== "object" || Array.isArray(form)) {
     return NextResponse.json({ error: "Invalid request data." }, { status: 400 });
+  }
+  if ((Number(request.headers.get("content-length") || "0") > 300_000) || JSON.stringify(body).length > 300_000) {
+    return NextResponse.json({ error: "Request payload is too large." }, { status: 413 });
   }
 
   const supabase = getSupabaseServerClient();
-  const { data: existing, error: readError } = await supabase
+const { data: existing, error: readError } = await supabase
     .from("cv_requests")
     .select("*")
     .eq("request_code", requestCode)
@@ -88,8 +70,18 @@ export async function PATCH(request: Request, context: { params: Promise<{ reque
     return NextResponse.json({ error: "Request not found." }, { status: 404 });
   }
 
-  if (!isEditableRequest(existing as Record<string, unknown>)) {
+  if (!isClientRequestEditable(existing)) {
     return NextResponse.json({ error: "This request can no longer be edited." }, { status: 409 });
+  }
+
+  const allowedFormFields = new Set([
+    "form_language", "full_name", "full_name_arabic", "gender", "date_of_birth", "include_gender_in_cv", "include_date_of_birth_in_cv", "phone", "email", "website", "cv_type", "target_job_title", "company_name", "job_url", "job_description_text", "professional_field", "target_role", "cv_language_count", "selected_cv_languages", "selected_cv_languages_other", "has_current_cv", "optional_cv_link", "tools", "spoken_languages", "professional_evidence", "professional_evidence_other", "platforms_worked_with", "platforms_other", "tools_other", "has_measurable_achievements", "measurable_achievements_text", "has_additional_experience", "additional_experience_text", "collaboration_types", "collaboration_other", "current_country", "nationality", "willing_to_relocate", "target_countries", "work_authorization", "work_authorization_other", "additional_professional_information", "cv_design_preference_other", "has_certifications", "certifications_text", "certifications_link", "cv_design_preference", "cv_template_link", "additional_information", "excluded_information", "recruitment_consent", "final_consent", "supporting_materials",
+  ]);
+  if (Object.keys(form).some((key) => !allowedFormFields.has(key))) {
+    return NextResponse.json({ error: "The request contains fields that cannot be edited." }, { status: 400 });
+  }
+  if (typeof form.website === "string" && form.website.trim()) {
+    return NextResponse.json({ error: "Invalid request data." }, { status: 400 });
   }
 
   const cvType = String(form.cv_type || existing.cv_type || "General CV");
@@ -103,10 +95,14 @@ export async function PATCH(request: Request, context: { params: Promise<{ reque
   }
 
   const selectedLanguages = safeArray(form.selected_cv_languages).map(String).slice(0, 3);
+  const priceDzd = calculateRequestPrice(Math.max(languageCount, selectedLanguages.length));
+  const coverLetterIncluded = shouldGenerateCoverLetter({ ...existing, ...form, cv_type: cvType });
   const currentRaw = existing.raw_payload && typeof existing.raw_payload === "object" ? existing.raw_payload : {};
   const mergedRaw = {
     ...currentRaw,
     ...form,
+    price_dzd: priceDzd,
+    cover_letter_included: coverLetterIncluded,
     job_description_file: undefined,
     current_cv_file: undefined,
     certifications_file: undefined,
@@ -139,12 +135,32 @@ export async function PATCH(request: Request, context: { params: Promise<{ reque
     additional_information: String(form.additional_information || "").trim() || null,
     excluded_information: String(form.excluded_information || "").trim() || null,
     recruitment_consent: form.recruitment_consent === true || form.recruitment_consent === "Yes",
-    final_consent: form.final_consent === true,
+    final_consent: Object.hasOwn(form, "final_consent") ? form.final_consent === true : existing.final_consent === true,
     raw_payload: mergedRaw,
   };
 
-  if (!updatePayload.full_name || !updatePayload.email) {
-    return NextResponse.json({ error: "Name and email are required." }, { status: 400 });
+  if (updatePayload.full_name.length < 2 || updatePayload.full_name.length > 160 || !/^[A-Za-zÀ-ÖØ-öø-ÿ' .-]+$/u.test(updatePayload.full_name)) {
+    return NextResponse.json({ error: "Enter a valid full name using Latin characters." }, { status: 400 });
+  }
+  if (updatePayload.email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(updatePayload.email)) {
+    return NextResponse.json({ error: "Enter a valid email address." }, { status: 400 });
+  }
+  if (updatePayload.phone.length < 6 || updatePayload.phone.length > 32) {
+    return NextResponse.json({ error: "Enter a valid WhatsApp number." }, { status: 400 });
+  }
+  if (!/^(ar|fr|en)$/.test(updatePayload.form_language)) {
+    return NextResponse.json({ error: "Choose a valid form language." }, { status: 400 });
+  }
+  if (Object.hasOwn(form, "spoken_languages") && !hasAtLeastThreeDistinctSpokenLanguages(form.spoken_languages)) {
+    const error = updatePayload.form_language === "ar"
+      ? "أدخل ثلاث لغات مختلفة على الأقل وحدد مستوى كل لغة."
+      : updatePayload.form_language === "fr"
+        ? "Indiquez au moins trois langues différentes et leur niveau."
+        : "Enter at least three different languages and select a level for each.";
+    return NextResponse.json({ error }, { status: 400 });
+  }
+  if (Object.hasOwn(form, "final_consent") && form.final_consent !== true) {
+    return NextResponse.json({ error: "Please confirm the request details before saving." }, { status: 400 });
   }
 
   const { data: updated, error: updateError } = await supabase
@@ -152,11 +168,13 @@ export async function PATCH(request: Request, context: { params: Promise<{ reque
     .update(updatePayload)
     .eq("id", existing.id)
     .eq("user_id", user.id)
+    .in("status", editableClientRequestStatuses())
+    .or("payment_status.neq.PAID,payment_status.is.null")
     .select("id,request_code,status,payment_status,cv_type,cv_language_count,selected_cv_languages")
-    .single();
+    .maybeSingle();
 
   if (updateError || !updated) {
-    return NextResponse.json({ error: "The request could not be updated." }, { status: 500 });
+    return NextResponse.json({ error: "This request can no longer be edited. Refresh the page to see its latest status." }, { status: 409 });
   }
 
   const submissionToken = await createRequestSubmissionToken(String(existing.id), String(existing.request_code));
@@ -166,5 +184,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reque
     request_code: updated.request_code,
     request: updated,
     submission_token: submissionToken,
+    price_dzd: priceDzd,
+    cover_letter_included: coverLetterIncluded,
   }, { headers: { "Cache-Control": "no-store" } });
 }

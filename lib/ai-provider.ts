@@ -8,6 +8,7 @@ export type CandidateDossier = {
   job_description_text: string | null;
   supporting_candidate_text: string | null;
   source_warnings: string[];
+  generate_cover_letter: boolean;
 };
 
 export interface AiProvider {
@@ -67,9 +68,9 @@ class HttpAiProvider implements AiProvider {
         messages: [
           {
             role: "system",
-            content: "Return only the requested structured JSON. Use only candidate-provided evidence. Source priority for candidate facts is explicit form data, then raw structured payload, then existing CV text, then supporting candidate file text. For job descriptions, use pasted job_description_text before uploaded file text. Never infer facts from job requirements. source_warnings are internal metadata, not candidate facts or invented gaps. Unsupported requirements must be gaps with reason not_confirmed.",
+            content: "Return only the requested structured JSON. Use only candidate-provided evidence. Source priority for candidate facts is explicit form data, then raw structured payload, then existing CV text, then supporting candidate file text. For job descriptions, use pasted job_description_text before uploaded file text. Never infer facts from job requirements. source_warnings are internal metadata, not candidate facts or invented gaps. Unsupported requirements must be gaps with reason not_confirmed. Include cover_letter as a polished, personalized application letter in the form language only when dossier.generate_cover_letter is true, using candidate evidence and supplied target details only; otherwise cover_letter must be null. Respect cv_personal_detail_preferences: include gender or date of birth in any deliverable only when its matching include flag is true, even if that detail appears in uploaded CV text. Never invent names, dates, experience, achievements, or contact details.",
           },
-          { role: "user", content: JSON.stringify({ task: "Analyze this CVUp candidate dossier", dossier: input }) },
+          { role: "user", content: JSON.stringify({ task: "Analyze this CVUp candidate dossier and prepare the requested deliverables", dossier: input }) },
         ],
       }),
     });
@@ -77,7 +78,7 @@ class HttpAiProvider implements AiProvider {
     const result = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const content = result.choices?.[0]?.message?.content;
     if (!content) throw new Error("AI provider returned no structured analysis.");
-    return parseCvAnalysis(JSON.parse(content));
+    return parseCvAnalysis(JSON.parse(content), input.generate_cover_letter);
   }
 }
 

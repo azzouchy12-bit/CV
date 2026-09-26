@@ -1,128 +1,59 @@
 "use client";
 
-import Link from "next/link";
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { getSupabaseBrowserClient } from "@/lib/supabase-client";
-import { getCountryOptions } from "@/lib/countries";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { getCountryLabel, getCountryOptions } from "@/lib/countries";
+import { useAccountWorkspace } from "@/components/account-workspace";
 
 type ProfileForm = {
-  full_name_latin: string;
-  full_name_arabic: string;
-  phone: string;
-  current_country: string;
-  nationality: string;
-  professional_field: string;
-  target_role: string;
+  full_name_latin: string; full_name_arabic: string; phone: string; current_country: string; nationality: string;
+  professional_field: string; target_role: string; professional_experience: string; education: string;
+  projects: string; skills: string; achievements: string; tools_text: string; certifications: string;
+  gender: string; date_of_birth: string; include_gender_in_cv: boolean; include_date_of_birth_in_cv: boolean;
+  spoken_languages: Record<string, unknown>[];
 };
-
-const emptyProfile: ProfileForm = {
-  full_name_latin: "",
-  full_name_arabic: "",
-  phone: "",
-  current_country: "",
-  nationality: "",
-  professional_field: "",
-  target_role: "",
+const empty: ProfileForm = { full_name_latin:"", full_name_arabic:"", phone:"", current_country:"", nationality:"", professional_field:"", target_role:"", professional_experience:"", education:"", projects:"", skills:"", achievements:"", tools_text:"", certifications:"", gender:"", date_of_birth:"", include_gender_in_cv:false, include_date_of_birth_in_cv:false, spoken_languages:[] };
+type Copy = { title:string; subtitle:string; edit:string; cancel:string; save:string; saving:string; saved:string; saveError:string; loadError:string; retry:string; personal:string; professional:string; skills:string; languages:string; certifications:string; links:string; name:string; arabicName:string; email:string; phone:string; country:string; nationality:string; field:string; role:string; experience:string; education:string; projects:string; achievements:string; tools:string; certs:string; spoken:string; linkedin:string; portfolio:string; otherLinks:string; notAdded:string; emptyTitle:string; emptyText:string; complete:string; provider:string; google:string; emailProvider:string; authAccount:string; gender:string; dob:string; showGender:string; showDob:string; optionalNotice:string; }
+const copy:Record<"ar"|"fr"|"en",Copy> = {
+  ar:{title:"الملف الشخصي",subtitle:"معلوماتك المهنية القابلة لإعادة الاستخدام في طلبات السير الذاتية القادمة.",edit:"تعديل الملف الشخصي",cancel:"إلغاء",save:"حفظ التغييرات",saving:"جارٍ الحفظ…",saved:"تم حفظ التغييرات.",saveError:"تعذر حفظ التغييرات. حاول مرة أخرى.",loadError:"تعذر تحميل ملفك الشخصي.",retry:"إعادة المحاولة",personal:"المعلومات الشخصية",professional:"المعلومات المهنية",skills:"المهارات والأدوات",languages:"اللغات",certifications:"الشهادات والتكوين",links:"الروابط المهنية",name:"الاسم بالأحرف اللاتينية",arabicName:"الاسم بالعربية",email:"البريد الإلكتروني",phone:"رقم واتساب",country:"بلد الإقامة",nationality:"الجنسية",field:"المجال المهني",role:"المنصب المستهدف الافتراضي",experience:"الخبرة المهنية",education:"التعليم والتكوين",projects:"المشاريع والأعمال",achievements:"الإنجازات والنتائج",tools:"الأدوات والبرامج",certs:"الشهادات",spoken:"اللغات المحفوظة",linkedin:"LinkedIn",portfolio:"المعرض أو الموقع",otherLinks:"روابط مهنية أخرى",notAdded:"لم تتم إضافته",emptyTitle:"أكمل ملفك المهني",emptyText:"ستُستخدم المعلومات المحفوظة لتسهيل طلبات السير الذاتية القادمة.",complete:"إكمال الملف الشخصي",provider:"طريقة تسجيل الدخول",google:"Google",emailProvider:"البريد الإلكتروني",authAccount:"الحساب والأمان",gender:"الجنس",dob:"تاريخ الميلاد",showGender:"إظهار الجنس في السيرة افتراضيًا",showDob:"إظهار تاريخ الميلاد في السيرة افتراضيًا",optionalNotice:"بيانات اختيارية، ويمكنك اختيار إظهارها أو إخفائها في سيرتك الذاتية."},
+  fr:{title:"Profil",subtitle:"Vos informations réutilisables pour vos prochaines demandes de CV.",edit:"Modifier le profil",cancel:"Annuler",save:"Enregistrer",saving:"Enregistrement…",saved:"Modifications enregistrées.",saveError:"Impossible d’enregistrer les modifications. Réessayez.",loadError:"Impossible de charger votre profil.",retry:"Réessayer",personal:"Informations personnelles",professional:"Informations professionnelles",skills:"Compétences et outils",languages:"Langues",certifications:"Certifications et formations",links:"Liens professionnels",name:"Nom en caractères latins",arabicName:"Nom en arabe",email:"E-mail",phone:"Numéro WhatsApp",country:"Pays de résidence",nationality:"Nationalité",field:"Domaine professionnel",role:"Poste visé par défaut",experience:"Expérience professionnelle",education:"Études et formations",projects:"Projets et réalisations",achievements:"Résultats",tools:"Outils et logiciels",certs:"Certifications",spoken:"Langues enregistrées",notAdded:"Non renseigné",emptyTitle:"Complétez votre profil professionnel",emptyText:"Vos informations enregistrées faciliteront vos prochaines demandes de CV.",complete:"Compléter le profil",provider:"Connexion utilisée",google:"Google",emailProvider:"E-mail",authAccount:"Compte et sécurité",gender:"Genre",dob:"Date de naissance",showGender:"Inclure le genre par défaut dans le CV",showDob:"Inclure la date de naissance par défaut dans le CV",optionalNotice:"Ces informations sont facultatives. Vous choisissez de les afficher ou de les masquer dans votre CV.",linkedin:"LinkedIn",portfolio:"Portfolio ou site",otherLinks:"Autres liens professionnels"},
+  en:{title:"Profile",subtitle:"Reusable professional information for your future CV requests.",edit:"Edit profile",cancel:"Cancel",save:"Save changes",saving:"Saving…",saved:"Changes saved.",saveError:"We couldn't save your changes. Please try again.",loadError:"We couldn't load your profile.",retry:"Try again",personal:"Personal information",professional:"Professional information",skills:"Skills & tools",languages:"Languages",certifications:"Certifications",links:"Professional links",name:"Full name in Latin characters",arabicName:"Full name in Arabic",email:"Email",phone:"WhatsApp number",country:"Country",nationality:"Nationality",field:"Professional field",role:"Default target role",experience:"Professional experience",education:"Education and training",projects:"Projects and portfolio work",achievements:"Achievements and results",tools:"Tools and software",certs:"Certifications",spoken:"Saved languages",notAdded:"Not added",emptyTitle:"Complete your professional profile",emptyText:"Your saved information will be reused in future CV requests.",complete:"Complete profile",provider:"Sign-in method",google:"Google",emailProvider:"Email",authAccount:"Account and security",gender:"Gender",dob:"Date of birth",showGender:"Include gender by default in CVs",showDob:"Include date of birth by default in CVs",optionalNotice:"These details are optional. Choose whether to show or hide them in your CV.",linkedin:"LinkedIn",portfolio:"Portfolio or website",otherLinks:"Other professional links"},
 };
+const record = (v:unknown):Record<string,unknown> => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string,unknown> : {};
+const str = (v:unknown) => typeof v === "string" ? v : "";
 
-export default function Profile() {
-  const [uid, setUid] = useState("");
-  const [p, setP] = useState<ProfileForm>(emptyProfile);
-  const [msg, setMsg] = useState("");
-  const [saving, setSaving] = useState(false);
-  const countries = useMemo(() => getCountryOptions("fr"), []);
-
-  useEffect(() => {
-    (async () => {
-      const s = getSupabaseBrowserClient();
-      const { data: { user } } = await s.auth.getUser();
-      if (!user) {
-        location.href = "/account/login";
-        return;
-      }
-      setUid(user.id);
-      const { data } = await s.from("profiles").select("*").eq("id", user.id).maybeSingle();
-      if (data) {
-        setP({
-          full_name_latin: data.full_name_latin || "",
-          full_name_arabic: data.full_name_arabic || "",
-          phone: data.phone || "",
-          current_country: data.current_country || "",
-          nationality: data.nationality || "",
-          professional_field: data.professional_field || "",
-          target_role: data.target_role || "",
-        });
-      }
-    })();
-  }, []);
-
-  const set = (key: keyof ProfileForm, value: string) => setP((current) => ({ ...current, [key]: value }));
-
-  async function save(e: FormEvent) {
-    e.preventDefault();
-    if (!uid) return;
-    setSaving(true);
-    setMsg("");
-    const { error } = await getSupabaseBrowserClient().from("profiles").upsert({
-      id: uid,
-      ...p,
-      updated_at: new Date().toISOString(),
-    });
-    setMsg(error ? error.message : "Information saved successfully.");
-    setSaving(false);
-  }
-
-  return (
-    <main className="min-h-screen bg-[#f7f9f4] p-4 text-[#102019] md:p-8">
-      <form onSubmit={save} className="mx-auto max-w-4xl rounded-[28px] bg-white p-6 shadow-sm md:p-9">
-        <Link href="/account" className="text-sm font-medium">← Dashboard</Link>
-        <h1 className="mt-5 text-3xl font-bold md:text-4xl">My information</h1>
-        <p className="mt-2 text-slate-500">Save your reusable information once. You can still change job-specific details for every new CV.</p>
-
-        <div className="mt-8 grid gap-5 md:grid-cols-2">
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium">Full name in Latin characters</span>
-            <input required autoComplete="name" value={p.full_name_latin} onChange={(e) => set("full_name_latin", e.target.value)} placeholder="Example: Seif Eddine Charef" className="w-full rounded-xl border border-slate-300 p-3 outline-none focus:border-slate-500" />
-          </label>
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium">Full name in Arabic</span>
-            <input required dir="rtl" value={p.full_name_arabic} onChange={(e) => set("full_name_arabic", e.target.value)} placeholder="مثال: سيف الدين شارف" className="w-full rounded-xl border border-slate-300 p-3 outline-none focus:border-slate-500" />
-          </label>
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium">WhatsApp number</span>
-            <input type="tel" autoComplete="tel" value={p.phone} onChange={(e) => set("phone", e.target.value)} placeholder="+213..." className="w-full rounded-xl border border-slate-300 p-3 outline-none focus:border-slate-500" />
-          </label>
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium">Professional field</span>
-            <input value={p.professional_field} onChange={(e) => set("professional_field", e.target.value)} placeholder="Marketing / Communication" className="w-full rounded-xl border border-slate-300 p-3 outline-none focus:border-slate-500" />
-          </label>
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium">Current country</span>
-            <select value={p.current_country} onChange={(e) => set("current_country", e.target.value)} className="w-full rounded-xl border border-slate-300 bg-white p-3 outline-none focus:border-slate-500">
-              <option value="">Select country</option>
-              {countries.map((country) => <option key={country.code} value={country.code}>{country.label}</option>)}
-            </select>
-          </label>
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium">Nationality</span>
-            <select value={p.nationality} onChange={(e) => set("nationality", e.target.value)} className="w-full rounded-xl border border-slate-300 bg-white p-3 outline-none focus:border-slate-500">
-              <option value="">Select nationality</option>
-              {countries.map((country) => <option key={country.code} value={country.code}>{country.label}</option>)}
-            </select>
-          </label>
-          <label className="block md:col-span-2">
-            <span className="mb-2 block text-sm font-medium">Default target role</span>
-            <input value={p.target_role} onChange={(e) => set("target_role", e.target.value)} placeholder="Example: Marketing Manager" className="w-full rounded-xl border border-slate-300 p-3 outline-none focus:border-slate-500" />
-            <span className="mt-2 block text-xs text-slate-500">This is only a reusable default. You can change it for each CV request.</span>
-          </label>
-        </div>
-
-        {msg && <p className="mt-5 rounded-xl bg-slate-50 px-4 py-3 text-sm">{msg}</p>}
-        <div className="mt-7 flex flex-wrap gap-3">
-          <button disabled={saving} className="rounded-full bg-[#102019] px-7 py-3 text-white disabled:opacity-60">{saving ? "Saving..." : "Save changes"}</button>
-          <Link href="/account" className="rounded-full border px-7 py-3">Cancel</Link>
-        </div>
-      </form>
-    </main>
-  );
+export default function ProfilePage(){
+  const {language}=useAccountWorkspace(); const t=copy[language];
+  const [form,setForm]=useState<ProfileForm>(empty); const [email,setEmail]=useState(""); const [providers,setProviders]=useState<string[]>([]);
+  const [loading,setLoading]=useState(true); const [loadError,setLoadError]=useState(false); const [editing,setEditing]=useState(false); const [saving,setSaving]=useState(false); const [message,setMessage]=useState("");
+  const countries=useMemo(()=>getCountryOptions(language),[language]);
+  const load=useCallback(async()=>{setLoading(true);setLoadError(false);try{const response=await fetch("/api/account/profile",{cache:"no-store"});if(!response.ok)throw new Error();const payload=await response.json();const data=record(payload.profile);const root=record(data.profile_data);const pro=record(root.professional_profile);const personal=record(root.personal_profile);setEmail(str(payload.email)||str(data.email));setProviders(Array.isArray(payload.providers)?payload.providers.filter((p:unknown):p is string=>typeof p==="string"):[]);setForm({full_name_latin:str(data.full_name_latin),full_name_arabic:str(data.full_name_arabic),phone:str(data.phone),current_country:str(data.current_country),nationality:str(data.nationality),professional_field:str(data.professional_field),target_role:str(data.target_role),professional_experience:str(pro.experience),education:str(pro.education),projects:str(pro.projects),skills:str(pro.skills),achievements:str(pro.achievements),tools_text:Array.isArray(data.tools)?data.tools.filter((x:unknown):x is string=>typeof x==="string").join("\n"):str(pro.tools_text),certifications:str(data.certifications_text),gender:str(personal.gender),date_of_birth:str(personal.date_of_birth),include_gender_in_cv:personal.include_gender_in_cv===true,include_date_of_birth_in_cv:personal.include_date_of_birth_in_cv===true,spoken_languages:Array.isArray(data.spoken_languages)?data.spoken_languages.map((x:unknown)=>record(x)):[]});}catch{setLoadError(true)}finally{setLoading(false)}},[]);
+  useEffect(()=>{const timer=window.setTimeout(()=>void load(),0);return()=>window.clearTimeout(timer)},[load]);
+  const update=<K extends keyof ProfileForm>(key:K,value:ProfileForm[K])=>setForm(current=>({...current,[key]:value}));
+  async function save(event:FormEvent){event.preventDefault();setSaving(true);setMessage("");try{const response=await fetch("/api/account/profile",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({profile:form})});if(!response.ok)throw new Error();setMessage(t.saved);setEditing(false);}catch{setMessage(t.saveError)}finally{setSaving(false)}}
+  const sections:{title:string;rows:[string,string,string?][]}[]=[
+    {title:t.personal,rows:[[t.name,form.full_name_latin,"ltr"],[t.arabicName,form.full_name_arabic],[t.email,email,"ltr"],[t.phone,form.phone,"ltr"],[t.country,getCountryLabel(form.current_country,language)],[t.nationality,getCountryLabel(form.nationality,language)]]},
+    {title:t.professional,rows:[[t.field,form.professional_field],[t.role,form.target_role],[t.experience,form.professional_experience],[t.education,form.education],[t.projects,form.projects],[t.achievements,form.achievements]]},
+    {title:t.skills,rows:[[t.skills,form.skills],[t.tools,form.tools_text]]},
+    {title:t.certifications,rows:[[t.certs,form.certifications]]},
+  ];
+  const hasInfo=sections.some(section=>section.rows.some(([,value])=>value.trim())) || form.spoken_languages.length>0;
+  if(loading)return <section className="account-panel account-profile-page" aria-busy="true"><div className="account-profile-skeleton"/><div className="account-profile-skeleton"/><div className="account-profile-skeleton"/></section>;
+  if(loadError)return <section className="account-panel account-profile-page"><h1>{t.loadError}</h1><button className="account-profile-button" onClick={()=>void load()}>{t.retry}</button></section>;
+  const field=(key:keyof ProfileForm,label:string,area=false)=><label className="account-profile-field"><span>{label}</span>{area?<textarea dir={key==="full_name_arabic"?"rtl":undefined} rows={3} value={String(form[key])} onChange={e=>update(key,e.target.value as never)}/>:<input dir={key==="full_name_arabic"?"rtl":key==="full_name_latin"||key==="phone"?"ltr":undefined} value={String(form[key])} onChange={e=>update(key,e.target.value as never)}/>}</label>;
+  return <main className="account-profile-page" lang={language} dir={language==="ar"?"rtl":"ltr"}>
+    <header className="account-profile-header"><div><h1>{t.title}</h1><p>{t.subtitle}</p></div>{!editing?<button className="account-profile-button account-profile-button--primary" onClick={()=>{setMessage("");setEditing(true)}}>{t.edit}</button>:null}</header>
+    {message?<p role="status" className="account-profile-message">{message}</p>:null}
+    {!hasInfo&&!editing?<section className="account-panel account-profile-empty"><h2>{t.emptyTitle}</h2><p>{t.emptyText}</p><button className="account-profile-button account-profile-button--primary" onClick={()=>setEditing(true)}>{t.complete}</button></section>:null}
+    {editing?<form onSubmit={save} className="account-profile-edit account-panel">
+      {sections.map(section=><section key={section.title} className="account-profile-section"><h2>{section.title}</h2>{section.title===t.personal?<div className="account-profile-read-row"><span>{t.email}</span><strong dir="ltr">{email}</strong></div>:null}<div className="account-profile-form-grid">{section.rows.filter(([label])=>label!==t.email).map(([label])=>{const key: keyof ProfileForm=label===t.name?"full_name_latin":label===t.arabicName?"full_name_arabic":label===t.phone?"phone":label===t.country?"current_country":label===t.nationality?"nationality":label===t.field?"professional_field":label===t.role?"target_role":label===t.experience?"professional_experience":label===t.education?"education":label===t.projects?"projects":label===t.achievements?"achievements":label===t.skills?"skills":label===t.tools?"tools_text":"certifications";
+        if(key==="current_country"||key==="nationality")return <label key={key} className="account-profile-field"><span>{label}</span><select value={String(form[key])} onChange={e=>update(key,e.target.value)}><option value="">—</option>{countries.map(country=><option key={country.code} value={country.code}>{country.label}</option>)}</select></label>;
+        return <div key={key}>{field(key,label,["professional_experience","education","projects","achievements","skills","tools_text","certifications"].includes(key))}</div>})}</div></section>)}
+      {form.spoken_languages.length?<section className="account-profile-section"><h2>{t.languages}</h2><div className="account-profile-language-list">{form.spoken_languages.map((item,index)=><div key={index}><strong>{str(item.language)==="Other"?str(item.language_other):str(item.language)}</strong><span>{str(item.level)==="Other"?str(item.level_other):str(item.level)}</span></div>)}</div></section>:null}
+      <section className="account-profile-section"><h2>{t.personal}</h2><p className="account-profile-muted">{t.optionalNotice}</p><div className="account-profile-form-grid"><label className="account-profile-field"><span>{t.gender}</span><input value={form.gender} onChange={e=>update("gender",e.target.value)}/></label><label className="account-profile-field"><span>{t.dob}</span><input type="date" value={form.date_of_birth} onChange={e=>update("date_of_birth",e.target.value)}/></label></div><div className="account-profile-toggles"><label><input type="checkbox" checked={form.include_gender_in_cv} onChange={e=>update("include_gender_in_cv",e.target.checked)}/>{t.showGender}</label><label><input type="checkbox" checked={form.include_date_of_birth_in_cv} onChange={e=>update("include_date_of_birth_in_cv",e.target.checked)}/>{t.showDob}</label></div></section>
+      <div className="account-profile-actions"><button type="button" className="account-profile-button" disabled={saving} onClick={()=>{setEditing(false);setMessage("");void load()}}>{t.cancel}</button><button className="account-profile-button account-profile-button--primary" disabled={saving}>{saving?t.saving:t.save}</button></div>
+    </form>:hasInfo?<div className="account-profile-sections">{sections.map(section=>{const rows=section.rows.filter(([,value])=>value.trim());return rows.length?<section key={section.title} className="account-profile-section account-panel"><h2>{section.title}</h2><dl>{rows.map(([label,value,direction])=><div className="account-profile-read-row" key={label}><dt>{label}</dt><dd dir={direction}>{value}</dd></div>)}</dl></section>:null})}
+      {form.spoken_languages.length?<section className="account-profile-section account-panel"><h2>{t.languages}</h2><div className="account-profile-language-list">{form.spoken_languages.map((item,index)=><div key={index}><strong>{str(item.language)==="Other"?str(item.language_other):str(item.language)}</strong><span>{str(item.level)==="Other"?str(item.level_other):str(item.level)}</span></div>)}</div></section>:null}
+      {(form.gender||form.date_of_birth)?<section className="account-profile-section account-panel"><h2>{t.personal}</h2><dl>{form.gender?<div className="account-profile-read-row"><dt>{t.gender}</dt><dd>{form.gender}{form.include_gender_in_cv?` · ${t.showGender}`:""}</dd></div>:null}{form.date_of_birth?<div className="account-profile-read-row"><dt>{t.dob}</dt><dd dir="ltr">{form.date_of_birth}{form.include_date_of_birth_in_cv?` · ${t.showDob}`:""}</dd></div>:null}</dl></section>:null}
+      {providers.length?<section className="account-profile-section account-panel"><h2>{t.authAccount}</h2><div className="account-profile-read-row"><dt>{t.email}</dt><dd dir="ltr">{email}</dd></div><div className="account-profile-read-row"><dt>{t.provider}</dt><dd>{providers.includes("google")?t.google:t.emailProvider}</dd></div></section>:null}</div>:null}
+  </main>;
 }

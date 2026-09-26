@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Cairo, Geist, Geist_Mono, Lateef, Tajawal } from "next/font/google";
 import "./globals.css";
 import "./hero-ux.css";
+import { ThemeProvider } from "@/components/theme-provider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -30,9 +31,12 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} ${lateef.variable} ${cairo.variable} ${tajawal.variable} h-full antialiased`}>
+    <html lang="en" suppressHydrationWarning className={`${geistSans.variable} ${geistMono.variable} ${lateef.variable} ${cairo.variable} ${tajawal.variable} h-full antialiased`}>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: `try{var t=localStorage.getItem('cvup_theme')||'system';var d=t==='dark'||(t==='system'&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.dataset.theme=d?'dark':'light';document.documentElement.style.colorScheme=d?'dark':'light';var p=new URLSearchParams(location.search);if(p.has('new')||p.has('edit'))document.documentElement.dataset.clientFlow='true'}catch(e){}` }} />
+      </head>
       <body className="min-h-full flex flex-col bg-slate-50 text-slate-900">
-        {children}
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );

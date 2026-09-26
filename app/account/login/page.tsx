@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import { getSupabaseBrowserClient } from "@/lib/supabase-client";
+import { safeInternalRedirect } from "@/lib/auth-redirect";
+import { getSavedClientLanguage } from "@/lib/client-preferences";
 
 type Language = "ar" | "fr" | "en";
 
@@ -23,6 +25,7 @@ const copy = {
     invalid: "Incorrect email or password.",
     unverified: "Please verify your email before signing in.",
     generic: "We couldn't sign you in. Please try again.",
+    oauthError: "Google sign-in could not be completed. Try again or sign in with email and password.",
   },
   fr: {
     title: "Bon retour",
@@ -40,6 +43,7 @@ const copy = {
     invalid: "E-mail ou mot de passe incorrect.",
     unverified: "Veuillez confirmer votre e-mail avant de vous connecter.",
     generic: "Impossible de vous connecter. Veuillez réessayer.",
+    oauthError: "La connexion Google n’a pas abouti. Réessayez ou connectez-vous avec votre e-mail et votre mot de passe.",
   },
   ar: {
     title: "مرحبًا بعودتك",
@@ -57,15 +61,12 @@ const copy = {
     invalid: "البريد الإلكتروني أو كلمة المرور غير صحيحة.",
     unverified: "يرجى تأكيد بريدك الإلكتروني قبل تسجيل الدخول.",
     generic: "تعذر تسجيل الدخول. حاول مرة أخرى.",
+    oauthError: "تعذر إكمال تسجيل الدخول عبر Google. حاول مجددًا أو استخدم البريد وكلمة المرور.",
   },
 } as const;
 
 function GoogleIcon() {
   return <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5"><path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41Z"/><path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.62-2.36l-3.24-2.54c-.9.6-2.05.96-3.38.96-2.61 0-4.82-1.76-5.61-4.13H3.04v2.62A10 10 0 0 0 12 22Z"/><path fill="#FBBC05" d="M6.39 13.93A6.02 6.02 0 0 1 6.08 12c0-.67.11-1.32.31-1.93V7.45H3.04A10 10 0 0 0 2 12c0 1.61.38 3.14 1.04 4.55l3.35-2.62Z"/><path fill="#EA4335" d="M12 5.94c1.47 0 2.79.5 3.83 1.5l2.87-2.88A9.62 9.62 0 0 0 12 2a10 10 0 0 0-8.96 5.45l3.35 2.62C7.18 7.7 9.39 5.94 12 5.94Z"/></svg>;
-}
-
-function safeNext(value: string | null) {
-  return value && value.startsWith("/") && !value.startsWith("//") ? value : "/account";
 }
 
 function mapError(message: string, language: Language) {
@@ -85,12 +86,13 @@ export default function Login() {
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    const resolvedNext = safeNext(new URLSearchParams(window.location.search).get("next"));
-    setNext(resolvedNext);
-    const stored = window.localStorage.getItem("cvup_language");
-    if (stored === "ar" || stored === "fr" || stored === "en") setLanguage(stored);
+    const resolvedNext = safeInternalRedirect(new URLSearchParams(window.location.search).get("next"), "/account", window.location.origin);
+    const currentLanguage: Language = getSavedClientLanguage();
     const supabase = getSupabaseBrowserClient();
     supabase.auth.getSession().then(({ data }) => {
+      setNext(resolvedNext);
+      setLanguage(currentLanguage);
+      if (new URLSearchParams(window.location.search).has("error")) setMessage(copy[currentLanguage].oauthError);
       if (data.session) window.location.replace(resolvedNext);
       else setChecking(false);
     });
@@ -137,7 +139,7 @@ export default function Login() {
   const rtl = language === "ar";
 
   return (
-    <main dir={rtl ? "rtl" : "ltr"} className="grid min-h-screen place-items-center bg-[#f7f9f4] p-4 text-[#102019] md:p-6">
+    <main lang={language} dir={rtl ? "rtl" : "ltr"} className="grid min-h-screen place-items-center bg-[#f7f9f4] p-4 text-[#102019] md:p-6">
       <section className="w-full max-w-[520px] rounded-[28px] border border-[#dfe7df] bg-white p-6 shadow-[0_18px_55px_rgba(16,32,25,.06)] md:p-10">
         <div className="flex items-center justify-between gap-4">
           <Link href="/" className="text-2xl font-bold tracking-tight">CVUp</Link>
@@ -206,6 +208,8 @@ export default function Login() {
             {submitting ? t.signingIn : t.signIn}
           </button>
         </form>
+
+        <Link href={`/account/recover?next=${encodeURIComponent(next)}`} className="mt-4 block text-center text-sm font-semibold text-[#0d5f46] underline-offset-4 hover:underline">{t.forgot}</Link>
 
         <div className="mt-7 border-t border-slate-100 pt-6 text-center">
           <p className="text-sm text-slate-500">{t.new}{" "}

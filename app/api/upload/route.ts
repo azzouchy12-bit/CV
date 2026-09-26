@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import { verifyRequestSubmissionToken } from "@/lib/request-submission-token";
 import { getSupabaseServerClient } from "@/lib/supabase";
+import { isClientRequestEditable } from "@/lib/client-request-editability";
 import { MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB } from "@/lib/upload-limits";
 
 const allowedMimeTypes = new Set([
   "application/pdf",
-  "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "text/plain",
   "image/jpeg",
@@ -63,12 +63,9 @@ function safeKindSegment(kind: string) {
 }
 
 function resolveMimeType(fileName: string, suppliedType?: string) {
-  if (suppliedType && allowedMimeTypes.has(suppliedType)) return suppliedType;
-
   const extension = fileName.toLowerCase().split(".").pop();
   const byExtension: Record<string, string> = {
     pdf: "application/pdf",
-    doc: "application/msword",
     docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     txt: "text/plain",
     jpg: "image/jpeg",
@@ -76,8 +73,24 @@ function resolveMimeType(fileName: string, suppliedType?: string) {
     png: "image/png",
     webp: "image/webp",
   };
+  const expectedType = extension ? byExtension[extension] : null;
+  if (!expectedType || !allowedMimeTypes.has(expectedType)) return null;
+  if (suppliedType && suppliedType !== "application/octet-stream" && suppliedType !== expectedType) return null;
+  return expectedType;
+}
 
-  return extension ? byExtension[extension] || null : null;
+function hasExpectedSignature(bytes: Uint8Array, contentType: string) {
+  const startsWith = (...signature: number[]) => signature.every((byte, index) => bytes[index] === byte);
+  if (startsWith(0x4d, 0x5a) || startsWith(0x7f, 0x45, 0x4c, 0x46)) return false;
+  switch (contentType) {
+    case "application/pdf": return new TextDecoder().decode(bytes.slice(0, 5)) === "%PDF-";
+    case "application/vnd.openxmlformats-officedocument.wordprocessingml.document": return startsWith(0x50, 0x4b, 0x03, 0x04);
+    case "image/jpeg": return startsWith(0xff, 0xd8, 0xff);
+    case "image/png": return startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+    case "image/webp": return new TextDecoder().decode(bytes.slice(0, 4)) === "RIFF" && new TextDecoder().decode(bytes.slice(8, 12)) === "WEBP";
+    case "text/plain": return !bytes.slice(0, Math.min(bytes.length, 4096)).includes(0);
+    default: return false;
+  }
 }
 
 function validateKind(kind: string) {
@@ -123,8 +136,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid upload kind." }, { status: 400 });
     }
 
-    const storagePath = `requests/${requestId}/${safeKindSegment(kindInfo.rawSegment)}/${Date.now()}-${safeFileName(fileName)}`;
     const supabase = getSupabaseServerClient();
+    const { data: requestRow } = await supabase.from("cv_requests")
+      .select("status,payment_status")
+      .eq("id", requestId)
+      .eq("request_code", verified.requestCode)
+      .maybeSingle();
+    if (!requestRow || !isClientRequestEditable(requestRow)) {
+      return NextResponse.json({ error: "Files cannot be changed after payment or processing begins." }, { status: 409 });
+    }
+
+    const storagePath = `requests/${requestId}/${safeKindSegment(kindInfo.rawSegment)}/${Date.now()}-${safeFileName(fileName)}`;
 
     const { data, error } = await supabase.storage
       .from("cvup-requests")
@@ -184,6 +206,14 @@ export async function PATCH(request: Request) {
     }
 
     const supabase = getSupabaseServerClient();
+    const { data: requestRow } = await supabase.from("cv_requests")
+      .select("id,status,payment_status")
+      .eq("id", requestId)
+      .eq("request_code", verified.requestCode)
+      .maybeSingle();
+    if (!requestRow || !isClientRequestEditable(requestRow)) {
+      return NextResponse.json({ error: "Files cannot be changed after payment or processing begins." }, { status: 409 });
+    }
     const lastSlash = path.lastIndexOf("/");
     const folder = path.slice(0, lastSlash);
     const objectName = path.slice(lastSlash + 1);
@@ -195,12 +225,27 @@ export async function PATCH(request: Request) {
       return NextResponse.json({ error: "Uploaded file could not be verified." }, { status: 409 });
     }
 
+    const uploadedObject = objectRows.find((item) => item.name === objectName);
+    const objectSize = Number(uploadedObject?.metadata?.size);
+    if (Number.isFinite(objectSize) && objectSize > MAX_UPLOAD_SIZE_BYTES) {
+      await supabase.storage.from("cvup-requests").remove([path]);
+      return NextResponse.json({ error: `File must not exceed ${MAX_UPLOAD_SIZE_MB} MB.` }, { status: 413 });
+    }
+    const { data: uploadedFile, error: downloadError } = await supabase.storage.from("cvup-requests").download(path);
+    if (downloadError || !uploadedFile) {
+      return NextResponse.json({ error: "Uploaded file could not be verified." }, { status: 409 });
+    }
+    if (uploadedFile.size > MAX_UPLOAD_SIZE_BYTES || !hasExpectedSignature(new Uint8Array(await uploadedFile.slice(0, 4096).arrayBuffer()), contentType)) {
+      await supabase.storage.from("cvup-requests").remove([path]);
+      return NextResponse.json({ error: uploadedFile.size > MAX_UPLOAD_SIZE_BYTES ? `File must not exceed ${MAX_UPLOAD_SIZE_MB} MB.` : "The file contents do not match the selected file type." }, { status: 415 });
+    }
+
     if (!kindInfo.isPrimary) {
       return NextResponse.json({ success: true, path, file_name: fileName, file_type: contentType });
     }
 
     const fields = primaryFileFields[kind as PrimaryKind];
-    const { error: updateError } = await supabase
+    const { data: updateData, error: updateError } = await supabase
       .from("cv_requests")
       .update({
         [fields.path]: path,
@@ -208,10 +253,14 @@ export async function PATCH(request: Request) {
         [fields.type]: contentType,
       })
       .eq("id", requestId)
-      .eq("request_code", verified.requestCode);
+      .eq("request_code", verified.requestCode)
+      .in("status", ["NEW", "DRAFT", "PENDING"])
+      .or("payment_status.neq.PAID,payment_status.is.null")
+      .select("id")
+      .maybeSingle();
 
-    if (updateError) {
-      return NextResponse.json({ error: "File metadata could not be saved." }, { status: 500 });
+    if (updateError || !updateData) {
+      return NextResponse.json({ error: "The request changed state; file metadata was not saved." }, { status: 409 });
     }
 
     return NextResponse.json({ success: true, path, file_name: fileName, file_type: contentType });

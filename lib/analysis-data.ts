@@ -3,6 +3,8 @@ import type { CvAnalysis } from "@/lib/ai-schema";
 import type { CandidateDossier } from "@/lib/ai-provider";
 import type { CvRequestRow } from "@/lib/admin-data";
 import { extractCandidateCvText, extractJobDescriptionText, extractSupportingCandidateText } from "@/lib/file-extraction";
+import { shouldGenerateCoverLetter } from "@/lib/request-deliverables";
+import { prepareCandidateRawPayload } from "@/lib/profile-privacy";
 
 export type StoredAnalysis = {
   id: string;
@@ -31,11 +33,12 @@ export async function buildCandidateDossier(request: CvRequestRow): Promise<Cand
   return {
     request_code: String(request.request_code),
     candidate_form_data: { ...request, raw_payload: undefined },
-    candidate_raw_payload: request.raw_payload,
+    candidate_raw_payload: prepareCandidateRawPayload(request.raw_payload),
     existing_cv_text: cv.text,
     job_description_text: request.job_description_text || jobDescription.text,
     supporting_candidate_text: supporting.text,
     source_warnings: sourceWarnings,
+    generate_cover_letter: shouldGenerateCoverLetter(request),
   };
 }
 

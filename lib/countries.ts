@@ -2,14 +2,12 @@ export const countryCodes = ["AW","AF","AO","AI","AX","AL","AD","AE","AR","AM","
 
 export type CountryCode = (typeof countryCodes)[number];
 
-export function getCountryOptions(_locale: "ar" | "fr" | "en") {
-  // Hydration-safe: option text must be identical in Node and every browser.
-  // Intl.DisplayNames differs across ICU/CLDR versions (for example FK),
-  // so use stable ISO codes in the SSR-rendered select.
+export function getCountryOptions(locale: "ar" | "fr" | "en") {
+  const names = new Intl.DisplayNames([locale], { type: "region" });
   return countryCodes.map((code) => ({
     code,
-    label: code,
-  }));
+    label: `${code.replace(/[A-Z]/g, (letter) => String.fromCodePoint(letter.charCodeAt(0) + 127397))} ${names.of(code) || code}`,
+  })).sort((left, right) => left.label.localeCompare(right.label, locale));
 }
 
 export function getCountryLabel(code: string, locale: "ar" | "fr" | "en") {

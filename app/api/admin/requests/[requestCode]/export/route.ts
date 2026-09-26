@@ -1,6 +1,8 @@
 import JSZip from "jszip";
 import { getAdminRequestByCode } from "@/lib/admin-data";
 import { getSupabaseServerClient } from "@/lib/supabase";
+import { getAnalysis } from "@/lib/analysis-data";
+import { shouldGenerateCoverLetter } from "@/lib/request-deliverables";
 
 const bucket = "cvup-requests";
 const generatedBucket = "cvup-generated";
@@ -46,6 +48,11 @@ export async function GET(_request: Request, { params }: { params: Promise<{ req
   if (!request) return new Response("Request not found.", { status: 404 });
 
   const raw = record(request.raw_payload);
+  const coverLetterEligible = shouldGenerateCoverLetter(request);
+  const analysis = request.id ? await getAnalysis(String(request.id)).catch(() => null) : null;
+  const coverLetter = coverLetterEligible && typeof analysis?.analysis.cover_letter === "string"
+    ? analysis.analysis.cover_letter.trim()
+    : "";
   const supporting = supportingMaterials(request.supporting_materials);
   const uploadedFiles = [
     ["Current CV", request.current_cv_file_path, request.current_cv_file_name],
@@ -74,6 +81,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ req
     row("Professional field", request.professional_field),
     row("CV language count", request.cv_language_count),
     row("Selected CV languages", request.selected_cv_languages),
+    row("Personalized cover letter included", coverLetterEligible),
     "",
     "## Target Job",
     row("Target job title", request.target_job_title),
@@ -155,6 +163,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ req
 
   const zip = new JSZip();
   zip.file("request.md", markdown);
+  if (coverLetter) zip.file("cover-letter.md", coverLetter);
 
   const supabase = getSupabaseServerClient();
   const warnings: string[] = [];

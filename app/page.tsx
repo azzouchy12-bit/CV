@@ -18,6 +18,10 @@ import { getText, languages, type LanguageCode } from "@/lib/i18n";
 import { getSupabaseBrowserClient } from "@/lib/supabase-client";
 import { getCountryLabel, getCountryOptions } from "@/lib/countries";
 import { MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB } from "@/lib/upload-limits";
+import { calculateRequestPrice, CVUP_BASE_PRICE_DZD } from "@/lib/pricing";
+import { shouldGenerateCoverLetter } from "@/lib/request-deliverables";
+import { getSavedClientLanguage, saveClientPreference } from "@/lib/client-preferences";
+import { hasAtLeastThreeDistinctSpokenLanguages } from "@/lib/spoken-languages";
 
 const supportingQuestionKeys = [
   "achievements",
@@ -38,6 +42,14 @@ type SupportingMaterialPayload = {
   file_name?: string | null;
   file_type?: string | null;
 };
+type ExistingSupportingMaterial = { question_key: string; link?: string | null; file_name?: string | null };
+
+type SpokenLanguageEntry = { language: string; level: string; professional_writing: boolean; language_other: string; level_other: string };
+const createEmptySpokenLanguage = (): SpokenLanguageEntry => ({ language: "", level: "", professional_writing: false, language_other: "", level_other: "" });
+function ensureMinimumSpokenLanguages(entries: unknown): SpokenLanguageEntry[] {
+  const saved = Array.isArray(entries) ? entries.filter((entry): entry is SpokenLanguageEntry => Boolean(entry && typeof entry === "object")) : [];
+  return [...saved, ...Array.from({ length: Math.max(0, 3 - saved.length) }, createEmptySpokenLanguage)];
+}
 
 const initialSupportingLinks: Record<SupportingQuestionKey, string[]> = Object.fromEntries(
   supportingQuestionKeys.map((key) => [key, [""]])
@@ -65,6 +77,10 @@ const initialForm = {
   form_language: "fr",
   full_name: "",
   full_name_arabic: "",
+  gender: "",
+  date_of_birth: "",
+  include_gender_in_cv: false,
+  include_date_of_birth_in_cv: false,
   phone: "",
   email: "",
   website: "",
@@ -74,7 +90,7 @@ const initialForm = {
   job_url: "",
   job_description_text: "",
   job_description_file: null as File | null,
-  professional_field: "Marketing / Communication",
+  professional_field: "",
   target_role: "",
   cv_language_count: 1,
   selected_cv_languages: ["French"],
@@ -83,7 +99,7 @@ const initialForm = {
   current_cv_file: null as File | null,
   optional_cv_link: "",
   tools: [] as string[],
-  spoken_languages: [{ language: "Arabic", level: "Native", professional_writing: false, language_other: "", level_other: "" }],
+  spoken_languages: [createEmptySpokenLanguage(), createEmptySpokenLanguage(), createEmptySpokenLanguage()],
   professional_evidence: [] as string[],
   professional_evidence_other: "",
   platforms_worked_with: [] as string[],
@@ -143,15 +159,27 @@ export default function HomePage() {
   const [status, setStatus] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showFloatingCta, setShowFloatingCta] = useState(true);
+  const [clientFlow, setClientFlow] = useState(false);
+  const [hasReusableProfile, setHasReusableProfile] = useState(false);
   const [currentStep, setCurrentStep] = useState(1);
+  const [draftOwnerId, setDraftOwnerId] = useState("");
+  const [draftReady, setDraftReady] = useState(false);
+  const [draftExists, setDraftExists] = useState(false);
+  const [draftSaveStatus, setDraftSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [draftSavedAt, setDraftSavedAt] = useState("");
+  const [draftFileNames, setDraftFileNames] = useState<string[]>([]);
+  const draftSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [spokenLanguageError, setSpokenLanguageError] = useState(false);
   const [reviewEditStep, setReviewEditStep] = useState<number | null>(null);
   const [supportingLinks, setSupportingLinks] = useState(initialSupportingLinks);
   const [supportingFiles, setSupportingFiles] = useState(initialSupportingFiles);
+  const [existingSupportingMaterials, setExistingSupportingMaterials] = useState<ExistingSupportingMaterial[]>([]);
   const [extraLinks, setExtraLinks] = useState(initialExtraLinks);
   const [extraFiles, setExtraFiles] = useState(initialExtraFiles);
   const [editingRequestCode, setEditingRequestCode] = useState<string | null>(null);
   const [editingRequestId, setEditingRequestId] = useState<string | null>(null);
   const [editSubmissionToken, setEditSubmissionToken] = useState<string | null>(null);
+  const [existingFileNames, setExistingFileNames] = useState<Partial<Record<"current_cv_file" | "job_description_file" | "certifications_file" | "cv_template_file", string>>>({});
   const formRef = useRef<HTMLFormElement>(null);
 
   const wizardSteps = [
@@ -180,10 +208,11 @@ export default function HomePage() {
     (async () => {
       const params = new URLSearchParams(window.location.search);
       const editCode = params.get("edit");
-      const isAccountRequest = params.get("new") === "1" || Boolean(editCode);
+      const isAccountRequest = ["1", "profile"].includes(params.get("new") || "") || Boolean(editCode);
+      setClientFlow(isAccountRequest);
 
+      const flowLanguage: LanguageCode = getSavedClientLanguage();
       const storedLanguage = window.localStorage.getItem("cvup_language");
-      const flowLanguage: LanguageCode = storedLanguage === "ar" || storedLanguage === "fr" || storedLanguage === "en" ? storedLanguage : "en";
       const flowText = (ar: string, fr: string, en: string) => flowLanguage === "ar" ? ar : flowLanguage === "fr" ? fr : en;
       if (storedLanguage === "ar" || storedLanguage === "fr" || storedLanguage === "en") {
         setLanguage(storedLanguage);
@@ -205,7 +234,7 @@ export default function HomePage() {
         const result = await response.json();
 
         if (!response.ok || !result?.request) {
-          setStatus(result?.error || ui("تعذر تحميل الطلب.", "Impossible de charger la demande.", "We couldn't load this request."));
+          setStatus(result?.error || flowText("تعذر تحميل الطلب.", "Impossible de charger la demande.", "We couldn't load this request."));
           return;
         }
 
@@ -214,8 +243,11 @@ export default function HomePage() {
           return;
         }
 
-        const request = result.request as Record<string, any>;
-        const raw = request.raw_payload && typeof request.raw_payload === "object" ? request.raw_payload : {};
+        const request = result.request as Record<string, unknown>;
+        setExistingSupportingMaterials(Array.isArray(request.supporting_materials)
+          ? request.supporting_materials.filter((item): item is ExistingSupportingMaterial => Boolean(item && typeof item === "object" && typeof (item as Record<string, unknown>).question_key === "string"))
+          : []);
+        const raw = request.raw_payload && typeof request.raw_payload === "object" && !Array.isArray(request.raw_payload) ? request.raw_payload as Record<string, unknown> : {};
         const formLanguage = ["ar", "fr", "en"].includes(String(raw.form_language || request.form_language))
           ? String(raw.form_language || request.form_language) as LanguageCode
           : "fr";
@@ -244,9 +276,7 @@ export default function HomePage() {
           has_current_cv: raw.has_current_cv === true || raw.has_current_cv === "Yes" || request.has_current_cv === true ? "Yes" : "No",
           optional_cv_link: String(raw.optional_cv_link || request.optional_cv_link || ""),
           tools: Array.isArray(raw.tools) ? raw.tools : Array.isArray(request.tools) ? request.tools : [],
-          spoken_languages: Array.isArray(raw.spoken_languages)
-            ? raw.spoken_languages
-            : Array.isArray(request.spoken_languages) ? request.spoken_languages : current.spoken_languages,
+          spoken_languages: ensureMinimumSpokenLanguages(Array.isArray(raw.spoken_languages) ? raw.spoken_languages : request.spoken_languages),
           has_certifications: raw.has_certifications === true || raw.has_certifications === "Yes" || request.has_certifications === true ? "Yes" : "No",
           certifications_text: String(raw.certifications_text || request.certifications_text || ""),
           certifications_link: String(raw.certifications_link || request.certifications_link || ""),
@@ -260,11 +290,17 @@ export default function HomePage() {
           job_description_file: null,
           certifications_file: null,
           cv_template_file: null,
-        }));
+        } as typeof current));
 
         setEditingRequestCode(editCode);
         setEditingRequestId(String(request.id));
         setEditSubmissionToken(typeof result.submission_token === "string" ? result.submission_token : null);
+        setExistingFileNames({
+          current_cv_file: typeof request.current_cv_file_name === "string" ? request.current_cv_file_name : undefined,
+          job_description_file: typeof request.job_description_file_name === "string" ? request.job_description_file_name : undefined,
+          certifications_file: typeof request.certifications_file_name === "string" ? request.certifications_file_name : undefined,
+          cv_template_file: typeof request.cv_template_file_name === "string" ? request.cv_template_file_name : undefined,
+        });
         setCurrentStep(7);
         setReviewEditStep(null);
         setStatus(null);
@@ -273,25 +309,163 @@ export default function HomePage() {
       }
 
       if (!user) return;
-      const { data: profile } = await supabase.from("profiles").select("*").eq("id", user.id).maybeSingle();
+      let localDraft: Record<string, unknown> | null = null;
+      if (isAccountRequest && !editCode) {
+        try {
+          const storedDraft = window.localStorage.getItem(`cvup_request_draft_${user.id}`);
+          localDraft = storedDraft ? JSON.parse(storedDraft) as Record<string, unknown> : null;
+        } catch {
+          localDraft = null;
+        }
+      }
+      const [profileResult, remoteDraftResponse] = await Promise.all([
+        supabase.from("profiles").select("*").eq("id", user.id).maybeSingle(),
+        isAccountRequest && !editCode ? fetch("/api/account/draft", { cache: "no-store" }).then((response) => response.ok ? response.json() : null).catch(() => null) : Promise.resolve(null),
+      ]);
+      const profile = profileResult.data;
+      const remoteDraft = remoteDraftResponse?.draft && typeof remoteDraftResponse.draft === "object" ? remoteDraftResponse.draft as Record<string, unknown> : null;
+      const requestDraft = remoteDraft || localDraft;
+      const profileData = profile?.profile_data && typeof profile.profile_data === "object" && !Array.isArray(profile.profile_data) ? profile.profile_data as Record<string, unknown> : {};
+      const professionalProfile = profileData.professional_profile && typeof profileData.professional_profile === "object" && !Array.isArray(profileData.professional_profile) ? profileData.professional_profile as Record<string, unknown> : {};
+      const personalProfile = profileData.personal_profile && typeof profileData.personal_profile === "object" && !Array.isArray(profileData.personal_profile) ? profileData.personal_profile as Record<string, unknown> : {};
+      const savedExperience = typeof professionalProfile.experience === "string" ? professionalProfile.experience : "";
+      const savedAchievements = typeof professionalProfile.achievements === "string" ? professionalProfile.achievements : "";
+      const savedEducation = typeof professionalProfile.education === "string" ? professionalProfile.education : "";
+      const savedProjects = typeof professionalProfile.projects === "string" ? professionalProfile.projects : "";
+      const savedSkills = typeof professionalProfile.skills === "string" ? professionalProfile.skills : "";
+      const savedAdditionalInformation = [
+        savedEducation && `${flowText("التعليم والتكوين", "Études et formations", "Education and training")}\n${savedEducation}`,
+        savedProjects && `${flowText("المشاريع", "Projets", "Projects")}\n${savedProjects}`,
+        savedSkills && `${flowText("المهارات", "Compétences", "Skills")}\n${savedSkills}`,
+      ].filter(Boolean).join("\n\n");
+      const savedTools = Array.isArray(profile?.tools) ? profile.tools.filter((item: unknown): item is string => typeof item === "string") : [];
+      const savedLanguages = Array.isArray(profile?.spoken_languages) ? profile.spoken_languages : [];
+      setHasReusableProfile(Boolean(profile?.full_name_latin || profile?.full_name_arabic || profile?.phone || profile?.professional_field || savedExperience || savedEducation || savedProjects || savedSkills || savedAchievements || personalProfile.gender || personalProfile.date_of_birth || savedTools.length || savedLanguages.length || (typeof profile?.certifications_text === "string" && profile.certifications_text.trim())));
       setForm((current) => ({
         ...current,
         email: current.email || user.email || "",
         full_name: current.full_name || profile?.full_name_latin || "",
         full_name_arabic: current.full_name_arabic || profile?.full_name_arabic || "",
+        gender: current.gender || (typeof personalProfile.gender === "string" ? personalProfile.gender : ""),
+        date_of_birth: current.date_of_birth || (typeof personalProfile.date_of_birth === "string" ? personalProfile.date_of_birth : ""),
+        include_gender_in_cv: current.include_gender_in_cv || personalProfile.include_gender_in_cv === true,
+        include_date_of_birth_in_cv: current.include_date_of_birth_in_cv || personalProfile.include_date_of_birth_in_cv === true,
         phone: current.phone || profile?.phone || "",
         current_country: current.current_country || profile?.current_country || "",
         nationality: current.nationality || profile?.nationality || "",
         professional_field: profile?.professional_field || current.professional_field,
         target_role: current.target_role || profile?.target_role || "",
+        tools: current.tools.length ? current.tools : savedTools,
+        spoken_languages: savedLanguages.length ? ensureMinimumSpokenLanguages(savedLanguages) : current.spoken_languages,
+        certifications_text: current.certifications_text || profile?.certifications_text || "",
+        additional_experience_text: current.additional_experience_text || savedExperience,
+        has_additional_experience: savedExperience ? "Yes" : current.has_additional_experience,
+        measurable_achievements_text: current.measurable_achievements_text || savedAchievements,
+        has_measurable_achievements: savedAchievements ? "Yes" : current.has_measurable_achievements,
+        additional_professional_information: current.additional_professional_information || savedAdditionalInformation,
       }));
 
+      if (isAccountRequest && !editCode) {
+        setDraftOwnerId(user.id);
+        if (requestDraft && requestDraft.form && typeof requestDraft.form === "object" && !Array.isArray(requestDraft.form)) {
+          const savedForm = requestDraft.form as Record<string, unknown>;
+          setForm((current) => ({
+            ...current,
+            ...savedForm,
+            form_language: ["ar", "fr", "en"].includes(String(savedForm.form_language)) ? savedForm.form_language as LanguageCode : current.form_language,
+            current_cv_file: null,
+            job_description_file: null,
+            certifications_file: null,
+            cv_template_file: null,
+            final_consent: false,
+          } as typeof current));
+          if (requestDraft.supportingLinks && typeof requestDraft.supportingLinks === "object") setSupportingLinks({ ...initialSupportingLinks, ...requestDraft.supportingLinks as typeof initialSupportingLinks });
+          if (requestDraft.extraLinks && typeof requestDraft.extraLinks === "object") setExtraLinks({ ...initialExtraLinks, ...requestDraft.extraLinks as typeof initialExtraLinks });
+          const savedStep = Number(requestDraft.step);
+          if (Number.isInteger(savedStep) && savedStep >= 1 && savedStep <= 7) setCurrentStep(savedStep);
+          if (Array.isArray(requestDraft.fileNames)) setDraftFileNames(requestDraft.fileNames.filter((name): name is string => typeof name === "string"));
+          if (typeof requestDraft.saved_at === "string") setDraftSavedAt(requestDraft.saved_at);
+          setDraftExists(true);
+        }
+        setDraftReady(true);
+      }
+
       if (isAccountRequest) {
-        setCurrentStep(1);
+        if (!requestDraft) setCurrentStep(1);
         window.requestAnimationFrame(() => document.getElementById("form")?.scrollIntoView({ behavior: "smooth", block: "start" }));
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (!draftReady || !clientFlow || editingRequestCode || !draftOwnerId) return;
+    const fileFields = new Set(["current_cv_file", "job_description_file", "certifications_file", "cv_template_file"]);
+    const draftForm = Object.fromEntries(Object.entries(form).filter(([key]) => !fileFields.has(key)));
+    draftForm.final_consent = false;
+    const fileNames = [
+      form.current_cv_file?.name,
+      form.job_description_file?.name,
+      form.certifications_file?.name,
+      form.cv_template_file?.name,
+      ...Object.values(supportingFiles).flatMap((files) => files.map((file) => file?.name)),
+      ...Object.values(extraFiles).flatMap((files) => files.map((file) => file?.name)),
+    ].filter((name): name is string => Boolean(name));
+    const draft = { form: draftForm, supportingLinks, extraLinks, step: currentStep, fileNames };
+    const localKey = `cvup_request_draft_${draftOwnerId}`;
+    const substantiveKeys = ["full_name", "full_name_arabic", "gender", "date_of_birth", "phone", "email", "target_job_title", "company_name", "job_url", "job_description_text", "professional_field", "target_role", "optional_cv_link", "professional_evidence_other", "measurable_achievements_text", "additional_experience_text", "current_country", "nationality", "target_countries", "work_authorization_other", "additional_professional_information", "certifications_text", "certifications_link", "cv_template_link", "cv_design_preference_other", "additional_information", "excluded_information"];
+    const hasSubstantiveFormData = substantiveKeys.some((key) => typeof draftForm[key] === "string" && String(draftForm[key]).trim())
+      || form.tools.length > 0 || form.spoken_languages.some((entry) => entry.language || entry.language_other || entry.level)
+      || form.professional_evidence.length > 0 || form.platforms_worked_with.length > 0 || form.collaboration_types.length > 0
+      || fileNames.length > 0 || Object.values(supportingLinks).flat().some((link) => link.trim()) || Object.values(extraLinks).flat().some((link) => link.trim());
+    if (!hasSubstantiveFormData) {
+      window.localStorage.removeItem(localKey);
+      if (draftExists) {
+        void fetch("/api/account/draft", { method: "DELETE" })
+          .then((response) => {
+            if (response.ok) {
+              setDraftExists(false);
+              setDraftSaveStatus("idle");
+              setDraftSavedAt("");
+            }
+          })
+          .catch(() => null);
+      }
+      return;
+    }
+    try { window.localStorage.setItem(localKey, JSON.stringify(draft)); } catch { /* Browser storage may be unavailable. */ }
+    if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current);
+    const saveDraft = async (keepalive = false) => {
+      try {
+        const response = await fetch("/api/account/draft", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ draft }),
+          keepalive,
+        });
+        if (!response.ok) throw new Error("Draft save failed");
+        const result = await response.json();
+        setDraftSaveStatus("saved");
+        setDraftExists(true);
+        setDraftSavedAt(typeof result.saved_at === "string" ? result.saved_at : new Date().toISOString());
+        try { window.localStorage.setItem(localKey, JSON.stringify({ ...draft, saved_at: typeof result.saved_at === "string" ? result.saved_at : new Date().toISOString() })); } catch { /* Browser storage may be unavailable. */ }
+      } catch {
+        setDraftSaveStatus("error");
+      }
+    };
+    const saveOnExit = () => {
+      if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current);
+      void saveDraft(true);
+    };
+    window.addEventListener("pagehide", saveOnExit);
+    draftSaveTimer.current = setTimeout(() => {
+      setDraftSaveStatus("saving");
+      void saveDraft();
+    }, 700);
+    return () => {
+      window.removeEventListener("pagehide", saveOnExit);
+      if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current);
+    };
+  }, [draftReady, draftExists, clientFlow, editingRequestCode, draftOwnerId, form, supportingLinks, extraLinks, supportingFiles, extraFiles, currentStep]);
 
   function validationMessageFor(field: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement) {
     if (field.validity.valueMissing) {
@@ -382,15 +556,80 @@ export default function HomePage() {
       invalidField.scrollIntoView({ behavior: "smooth", block: "center" });
       return false;
     }
+    if (currentStep === 5) {
+      const entries = form.spoken_languages;
+      if (!hasAtLeastThreeDistinctSpokenLanguages(entries)) {
+        setSpokenLanguageError(true);
+        const languageSelect = formRef.current.querySelector<HTMLSelectElement>('[data-language-select="true"]');
+        languageSelect?.focus({ preventScroll: true });
+        languageSelect?.scrollIntoView({ behavior: "smooth", block: "center" });
+        return false;
+      }
+    }
+    setSpokenLanguageError(false);
     return true;
   }
 
-  function moveStep(direction: 1 | -1) {
+  function buildFormPayload() {
+    const fileFields = new Set(["current_cv_file", "job_description_file", "certifications_file", "cv_template_file"]);
+    const serializableForm = Object.fromEntries(Object.entries(form).filter(([key]) => !fileFields.has(key)));
+    const supportingMaterials: SupportingMaterialPayload[] = [
+      ...supportingQuestionKeys.flatMap((questionKey) =>
+        supportingLinks[questionKey]
+          .map((link) => link.trim())
+          .filter(Boolean)
+          .map((link) => ({ question_key: questionKey, link }))
+      ),
+      ...primaryAttachmentKeys.flatMap((attachmentKey) =>
+        extraLinks[attachmentKey]
+          .map((link) => link.trim())
+          .filter(Boolean)
+          .map((link) => ({ question_key: attachmentKey, link }))
+      ),
+    ];
+
+    return {
+      ...serializableForm,
+      selected_cv_languages: form.selected_cv_languages.map((item) =>
+        item === "Other" ? form.selected_cv_languages_other.trim() || "Other" : item
+      ),
+      recruitment_consent: form.recruitment_consent === "Yes",
+      final_consent: form.final_consent,
+      supporting_materials: supportingMaterials,
+    };
+  }
+
+  async function moveStep(direction: 1 | -1) {
     if (direction === 1 && !validateCurrentStep()) return;
 
     if (direction === 1 && reviewEditStep === currentStep) {
-      setReviewEditStep(null);
-      setCurrentStep(7);
+      if (editingRequestCode) {
+        setIsSubmitting(true);
+        setStatus(null);
+        try {
+          const sectionPayload = { ...buildFormPayload() };
+          delete (sectionPayload as Record<string, unknown>).supporting_materials;
+          delete (sectionPayload as Record<string, unknown>).final_consent;
+          const response = await fetch(`/api/account/requests/${encodeURIComponent(editingRequestCode)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ form: sectionPayload }),
+          });
+          const result = await response.json().catch(() => null);
+          if (!response.ok) throw new Error(result?.error || ui("تعذر حفظ هذا القسم.", "Impossible d’enregistrer cette section.", "We couldn't save this section."));
+          if (typeof result?.submission_token === "string") setEditSubmissionToken(result.submission_token);
+          setReviewEditStep(null);
+          setCurrentStep(7);
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : ui("تعذر حفظ التغييرات.", "Impossible d’enregistrer les modifications.", "Couldn't save your changes."));
+          setIsSubmitting(false);
+          return;
+        }
+        setIsSubmitting(false);
+      } else {
+        setReviewEditStep(null);
+        setCurrentStep(7);
+      }
     } else {
       setCurrentStep((step) => Math.min(7, Math.max(1, step + direction)));
     }
@@ -410,14 +649,112 @@ export default function HomePage() {
     if (typeof value === "string") return value ? optionLabel(value) : "—";
     return value === null || value === undefined ? "—" : String(value);
   };
-  const fileName = (file: File | null) => file?.name || "—";
-  const reviewGroups = [
-    { step: 1, title: stepTitle(wizardSteps[0]), values: [[ui("الاسم باللاتينية", "Nom en caractères latins", "Name in Latin characters"), form.full_name], [ui("الاسم بالعربية", "Nom en arabe", "Name in Arabic"), form.full_name_arabic], [ui("الهاتف", "Téléphone", "Phone"), form.phone], [ui("البريد", "E-mail", "Email"), form.email]] },
-    { step: 2, title: stepTitle(wizardSteps[1]), values: [[ui("نوع السيرة", "Type de CV", "CV type"), form.cv_type], [ui("الدور", "Rôle", "Role"), form.target_role], [ui("المجال", "Domaine", "Field"), form.professional_field], [ui("الوظيفة", "Poste visé", "Job title"), form.target_job_title], [ui("الشركة", "Entreprise", "Company"), form.company_name], [ui("ملف وصف الوظيفة", "Fichier de l’offre", "Job description file"), fileName(form.job_description_file)]] },
-    { step: 3, title: stepTitle(wizardSteps[2]), values: [[ui("المسؤوليات", "Responsabilités", "Responsibilities"), form.professional_evidence], [ui("الإنجازات", "Réalisations", "Achievements"), form.measurable_achievements_text], [ui("خبرة إضافية", "Expérience complémentaire", "Additional experience"), form.additional_experience_text]] },
-    { step: 4, title: stepTitle(wizardSteps[3]), values: [[ui("الأدوات", "Outils", "Tools"), form.tools], [ui("المنصات", "Plateformes", "Platforms"), form.platforms_worked_with]] },
-    { step: 5, title: stepTitle(wizardSteps[4]), values: [[ui("اللغات", "Langues", "Languages"), form.spoken_languages.map((entry) => `${optionLabel(entry.language === "Other" ? entry.language_other || entry.language : entry.language)} (${optionLabel(entry.level === "Other" ? entry.level_other || entry.level : entry.level)})`)], [ui("الشهادات", "Certifications", "Certifications"), form.certifications_text], [ui("ملف الشهادة", "Fichier de certification", "Certification file"), fileName(form.certifications_file)]] },
-    { step: 6, title: stepTitle(wizardSteps[5]), values: [[ui("ملف CV", "Fichier CV", "CV file"), fileName(form.current_cv_file)], [ui("لغات CV", "Langues du CV", "CV languages"), form.selected_cv_languages.map((item) => item === "Other" ? form.selected_cv_languages_other || optionLabel(item) : optionLabel(item))], [ui("التصميم", "Design", "Design"), form.cv_design_preference], [ui("ملف القالب", "Fichier modèle", "Template file"), fileName(form.cv_template_file)], [ui("البلد", "Pays", "Country"), form.current_country ? countryLabel(form.current_country) : "—"], [ui("الجنسية", "Nationalité", "Nationality"), form.nationality ? countryLabel(form.nationality) : "—"]] },
+  const fileName = (file: File | null, key?: keyof typeof existingFileNames) => file?.name || (key ? existingFileNames[key] : undefined) || "—";
+  const isTargetedCv = form.cv_type !== "General CV";
+  const supportLabels: Record<SupportingQuestionKey, string> = {
+    achievements: ui("ملفات الإنجازات", "Justificatifs des réalisations", "Achievement evidence"),
+    additional_experience: ui("مرفقات الخبرة الإضافية", "Pièces d’expérience complémentaire", "Additional experience attachments"),
+    missing_information: ui("مرفقات المعلومات الناقصة", "Pièces des informations manquantes", "Missing information attachments"),
+    excluded_information: ui("مرفقات المعلومات المستبعدة", "Pièces des informations exclues", "Excluded information attachments"),
+    additional_professional_information: ui("مرفقات المعلومات المهنية الإضافية", "Pièces professionnelles complémentaires", "Additional professional information attachments"),
+  };
+  const supportingReview = supportingQuestionKeys.flatMap((key) => [
+    ...supportingLinks[key].map((link) => link.trim()).filter(Boolean).map((link) => `${supportLabels[key]} — ${link}`),
+    ...supportingFiles[key].filter((file): file is File => file instanceof File).map((file) => `${supportLabels[key]} — ${file.name}`),
+  ]);
+  const extraAttachmentLabels: Record<PrimaryAttachmentKey, string> = {
+    job_description: ui("روابط أو ملفات وصف الوظيفة الإضافية", "Liens ou fichiers supplémentaires de l’offre", "Extra job description links or files"),
+    current_cv: ui("روابط أو ملفات السيرة الإضافية", "Liens ou fichiers CV supplémentaires", "Extra CV links or files"),
+    certifications: ui("روابط أو ملفات شهادات إضافية", "Liens ou fichiers de certificats supplémentaires", "Extra certificate links or files"),
+    template: ui("روابط أو ملفات قوالب إضافية", "Liens ou fichiers de modèles supplémentaires", "Extra template links or files"),
+  };
+  const extraAttachmentReview = primaryAttachmentKeys.flatMap((key) => [
+    ...extraLinks[key].map((link) => link.trim()).filter(Boolean).map((link) => `${extraAttachmentLabels[key]} — ${link}`),
+    ...extraFiles[key].filter((file): file is File => file instanceof File).map((file) => `${extraAttachmentLabels[key]} — ${file.name}`),
+  ]);
+  const savedSupportingReview = existingSupportingMaterials.map((material) => {
+    const key = material.question_key as SupportingQuestionKey | PrimaryAttachmentKey;
+    const label = key in supportLabels ? supportLabels[key as SupportingQuestionKey] : key in extraAttachmentLabels ? extraAttachmentLabels[key as PrimaryAttachmentKey] : key;
+    return `${label} — ${material.file_name || material.link || ""}`;
+  }).filter((item) => item.trim().endsWith("—") === false);
+  const currentSelectedFileNames = [
+    form.current_cv_file?.name,
+    form.job_description_file?.name,
+    form.certifications_file?.name,
+    form.cv_template_file?.name,
+    ...Object.values(supportingFiles).flatMap((files) => files.map((file) => file?.name)),
+    ...Object.values(extraFiles).flatMap((files) => files.map((file) => file?.name)),
+  ].filter((name): name is string => Boolean(name));
+  const draftFilesToReselect = draftFileNames.filter((name) => !currentSelectedFileNames.includes(name));
+  const reviewGroups: { step: number; title: string; values: [string, unknown][] }[] = [
+    { step: 1, title: stepTitle(wizardSteps[0]), values: [
+      [ui("لغة النموذج", "Langue du formulaire", "Form language"), language === "ar" ? ui("العربية", "Arabe", "Arabic") : language === "fr" ? ui("الفرنسية", "Français", "French") : ui("الإنجليزية", "Anglais", "English")],
+      [ui("الاسم بالأحرف اللاتينية", "Nom en caractères latins", "Name in Latin characters"), form.full_name],
+      [ui("الاسم بالعربية", "Nom en arabe", "Name in Arabic"), form.full_name_arabic],
+      [ui("الجنس", "Genre", "Gender"), form.gender],
+      [ui("إظهار الجنس في السيرة الذاتية", "Afficher le genre sur le CV", "Show gender on CV"), form.gender ? (form.include_gender_in_cv ? ui("نعم", "Oui", "Yes") : ui("لا", "Non", "No")) : ""],
+      [ui("تاريخ الميلاد", "Date de naissance", "Date of birth"), form.date_of_birth],
+      [ui("إظهار تاريخ الميلاد في السيرة الذاتية", "Afficher la date de naissance sur le CV", "Show date of birth on CV"), form.date_of_birth ? (form.include_date_of_birth_in_cv ? ui("نعم", "Oui", "Yes") : ui("لا", "Non", "No")) : ""],
+      [ui("رقم واتساب", "Numéro WhatsApp", "WhatsApp number"), form.phone],
+      [ui("البريد الإلكتروني", "E-mail", "Email"), form.email],
+      [ui("الموقع الإلكتروني", "Site web", "Website"), form.website],
+    ] },
+    { step: 2, title: stepTitle(wizardSteps[1]), values: [
+      [ui("نوع السيرة الذاتية", "Type de CV", "CV type"), form.cv_type],
+      [ui("الدور المستهدف", "Rôle visé", "Target role"), form.target_role],
+      [ui("المجال المهني", "Domaine professionnel", "Professional field"), form.professional_field],
+      [ui("عدد نسخ السيرة الذاتية", "Nombre de versions du CV", "Number of CV versions"), form.cv_language_count],
+      [ui("لغات السيرة الذاتية المطلوبة", "Langues du CV demandées", "Requested CV languages"), form.selected_cv_languages.map((item) => item === "Other" ? form.selected_cv_languages_other || optionLabel(item) : optionLabel(item))],
+      ...(isTargetedCv ? [
+        [ui("المسمى الوظيفي", "Poste visé", "Job title"), form.target_job_title],
+        [ui("الشركة", "Entreprise", "Company"), form.company_name],
+        [ui("رابط الوظيفة", "Lien de l’offre", "Job URL"), form.job_url],
+        [ui("وصف الوظيفة المكتوب", "Description du poste saisie", "Entered job description"), form.job_description_text],
+        [ui("ملف وصف الوظيفة", "Fichier de l’offre", "Job description file"), fileName(form.job_description_file, "job_description_file")],
+      ] as [string, unknown][] : []),
+    ] },
+    { step: 3, title: stepTitle(wizardSteps[2]), values: [
+      [ui("المسؤوليات والخبرات المحددة", "Responsabilités et expériences sélectionnées", "Selected responsibilities and experience"), form.professional_evidence],
+      [ui("مسؤوليات أخرى", "Autres responsabilités", "Other responsibilities"), form.professional_evidence_other],
+      [ui("إنجازات قابلة للقياس؟", "Réalisations mesurables ?", "Measurable achievements?"), form.has_measurable_achievements],
+      [ui("تفاصيل الإنجازات", "Détails des réalisations", "Achievement details"), form.measurable_achievements_text],
+      [ui("خبرة إضافية؟", "Expérience supplémentaire ?", "Additional experience?"), form.has_additional_experience],
+      [ui("تفاصيل الخبرة الإضافية", "Détails de l’expérience supplémentaire", "Additional experience details"), form.additional_experience_text],
+      [ui("أنواع التعاون", "Types de collaboration", "Collaboration types"), form.collaboration_types],
+      [ui("أنواع تعاون أخرى", "Autres types de collaboration", "Other collaboration types"), form.collaboration_other],
+      [ui("بلد الإقامة", "Pays de résidence", "Current country"), form.current_country ? countryLabel(form.current_country) : ""],
+      [ui("الجنسية", "Nationalité", "Nationality"), form.nationality ? countryLabel(form.nationality) : ""],
+      [ui("الاستعداد للانتقال", "Disponibilité à déménager", "Willing to relocate"), form.willing_to_relocate],
+      [ui("البلدان المستهدفة", "Pays ciblés", "Target countries"), form.target_countries],
+      [ui("تصريح العمل", "Autorisation de travail", "Work authorization"), form.work_authorization],
+      [ui("تفاصيل تصريح العمل الأخرى", "Autres détails d’autorisation", "Other work authorization details"), form.work_authorization_other],
+    ] },
+    { step: 4, title: stepTitle(wizardSteps[3]), values: [
+      [ui("الأدوات", "Outils", "Tools"), form.tools], [ui("أدوات أخرى", "Autres outils", "Other tools"), form.tools_other],
+      [ui("المنصات المستخدمة", "Plateformes utilisées", "Platforms used"), form.platforms_worked_with], [ui("منصات أخرى", "Autres plateformes", "Other platforms"), form.platforms_other],
+    ] },
+    { step: 5, title: stepTitle(wizardSteps[4]), values: [
+      [ui("اللغات ومستوياتها", "Langues et niveaux", "Languages and proficiency levels"), form.spoken_languages.map((entry) => `${entry.language === "Other" ? entry.language_other || optionLabel(entry.language) : optionLabel(entry.language)} — ${entry.level === "Other" ? entry.level_other || optionLabel(entry.level) : optionLabel(entry.level)}${entry.professional_writing ? ` · ${ui("كتابة مهنية", "Écriture professionnelle", "Professional writing")}` : ""}`)],
+      [ui("هل لديك شهادات أو تكوين إضافي؟", "Avez-vous des certificats ou formations ?", "Do you have certificates or additional training?"), form.has_certifications],
+      [ui("تفاصيل الشهادات والتكوين", "Détails des certificats et formations", "Certificates and training details"), form.certifications_text],
+      [ui("رابط الشهادة", "Lien du certificat", "Certificate link"), form.certifications_link],
+      [ui("ملف الشهادة أو التكوين", "Fichier du certificat ou de formation", "Certificate or training file"), fileName(form.certifications_file, "certifications_file")],
+    ] },
+    { step: 6, title: stepTitle(wizardSteps[5]), values: [
+      [ui("هل لديك سيرة ذاتية حالية؟", "Avez-vous déjà un CV ?", "Do you have a current CV?"), form.has_current_cv],
+      [ui("ملف السيرة الحالية", "Fichier du CV actuel", "Current CV file"), fileName(form.current_cv_file, "current_cv_file")],
+      [ui("رابط السيرة الحالية", "Lien du CV actuel", "Current CV link"), form.optional_cv_link],
+      [ui("التصميم المفضل", "Design préféré", "Preferred design"), form.cv_design_preference],
+      [ui("تفضيل تصميم آخر", "Autre préférence de design", "Other design preference"), form.cv_design_preference_other],
+      [ui("ملف القالب", "Fichier modèle", "Template file"), fileName(form.cv_template_file, "cv_template_file")],
+      [ui("رابط القالب", "Lien du modèle", "Template link"), form.cv_template_link],
+      [getText(language, "missingInfo"), form.additional_information], [getText(language, "excludedInfo"), form.excluded_information],
+      [getText(language, "finalProfessionalInfo"), form.additional_professional_information],
+      [ui("الموافقة على مشاركة السيرة", "Accord de partage du CV", "Consent to share the CV"), form.recruitment_consent],
+      [ui("التأكيد النهائي على دقة المعلومات", "Confirmation finale de l’exactitude", "Final confirmation of accuracy"), form.final_consent],
+      [ui("الروابط والملفات الداعمة", "Liens et fichiers justificatifs", "Supporting links and files"), [...supportingReview, ...extraAttachmentReview, ...savedSupportingReview]],
+      [ui("ملفات المسودة التي تحتاج إلى إعادة اختيار", "Fichiers du brouillon à sélectionner de nouveau", "Draft files to select again"), draftFilesToReselect],
+    ] },
   ];
 
   useEffect(() => {
@@ -514,7 +851,7 @@ export default function HomePage() {
               <div key={`file-${questionKey}-${index}`} className="flex gap-2">
                 <input
                   type="file"
-                  accept=".pdf,.doc,.docx,.txt,.jpg,.jpeg,.png,.webp"
+                  accept=".pdf,.docx,.txt,.jpg,.jpeg,.png,.webp"
                   onChange={(event) => setSupportingFiles((current) => ({
                     ...current,
                     [questionKey]: current[questionKey].map((item, itemIndex) => itemIndex === index ? event.target.files?.[0] ?? null : item),
@@ -590,7 +927,7 @@ export default function HomePage() {
           <div key={`extra-file-${attachmentKey}-${index}`} className="mb-2 flex gap-2">
             <input
               type="file"
-              accept=".pdf,.doc,.docx,.txt,.jpg,.jpeg,.png,.webp"
+              accept=".pdf,.docx,.txt,.jpg,.jpeg,.png,.webp"
               onChange={(event) => setExtraFiles((current) => ({
                 ...current,
                 [attachmentKey]: current[attachmentKey].map((item, itemIndex) => itemIndex === index ? event.target.files?.[0] ?? null : item),
@@ -643,8 +980,11 @@ export default function HomePage() {
 
   const handleLanguageSelect = (code: LanguageCode) => {
     setLanguage(code);
+    window.localStorage.setItem("cvup_language", code);
     setForm((current) => ({ ...current, form_language: code }));
+    void saveClientPreference("preferred_language", code);
   };
+  const hasReviewValue = (value: unknown) => Array.isArray(value) ? value.length > 0 : typeof value === "string" ? value.trim().length > 0 && value.trim() !== "—" : value !== null && value !== undefined;
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -674,33 +1014,8 @@ export default function HomePage() {
         job_description_file,
         certifications_file,
         cv_template_file,
-        ...serializableForm
       } = form;
-
-      const initialMaterials: SupportingMaterialPayload[] = [
-        ...supportingQuestionKeys.flatMap((questionKey) =>
-          supportingLinks[questionKey]
-            .map((link) => link.trim())
-            .filter(Boolean)
-            .map((link) => ({ question_key: questionKey, link }))
-        ),
-        ...primaryAttachmentKeys.flatMap((attachmentKey) =>
-          extraLinks[attachmentKey]
-            .map((link) => link.trim())
-            .filter(Boolean)
-            .map((link) => ({ question_key: attachmentKey, link }))
-        ),
-      ];
-
-      const body = {
-        ...serializableForm,
-        selected_cv_languages: form.selected_cv_languages.map((item) =>
-          item === "Other" ? form.selected_cv_languages_other.trim() || "Other" : item
-        ),
-        recruitment_consent: form.recruitment_consent === "Yes",
-        final_consent: form.final_consent,
-        supporting_materials: initialMaterials,
-      };
+      const body = buildFormPayload();
 
       const response = await fetch(
         editingRequestCode ? `/api/account/requests/${encodeURIComponent(editingRequestCode)}` : "/api/requests",
@@ -809,7 +1124,7 @@ export default function HomePage() {
         if (item.file) await uploadFile(item.file, item.kind);
       }
 
-      const materials = [...initialMaterials];
+      const materials = [...body.supporting_materials];
 
       for (const questionKey of supportingQuestionKeys) {
         for (const file of supportingFiles[questionKey].filter((item): item is File => item instanceof File)) {
@@ -856,11 +1171,27 @@ export default function HomePage() {
         }
       }
 
+      if (clientFlow && draftOwnerId && !editingRequestCode) {
+        window.localStorage.removeItem(`cvup_request_draft_${draftOwnerId}`);
+        await fetch("/api/account/draft", { method: "DELETE" }).catch(() => null);
+        setDraftReady(false);
+      }
+
       if (editingRequestCode) {
         setStatus(ui("تم حفظ التعديلات بنجاح.", "Modifications enregistrées.", "Changes saved successfully."));
+        window.sessionStorage.setItem("cvup_updated_price_dzd", String(Number(result?.price_dzd) || requestPrice));
+        window.sessionStorage.setItem("cvup_updated_language_count", String(cvLanguageCount));
+        window.sessionStorage.setItem("cvup_updated_targeted", String(coverLetterIncluded));
         router.push("/account");
       } else {
         setStatus(ui(`تم إرسال الطلب: ${requestCode}`, `Demande envoyée : ${requestCode}`, `Request submitted: ${requestCode}`));
+        window.sessionStorage.setItem(`cvup_price_${requestCode}`, String(Number(result?.price_dzd) || requestPrice));
+        window.sessionStorage.setItem(`cvup_language_${requestCode}`, language);
+        window.sessionStorage.setItem(`cvup_type_${requestCode}`, form.cv_type);
+        window.sessionStorage.setItem(`cvup_cover_letter_${requestCode}`, String(Boolean(result?.cover_letter_included)));
+        window.sessionStorage.setItem(`cvup_language_count_${requestCode}`, String(cvLanguageCount));
+        window.sessionStorage.setItem(`cvup_name_${requestCode}`, form.full_name);
+        window.sessionStorage.setItem(`cvup_name_ar_${requestCode}`, form.full_name_arabic);
         router.push(`/success?request_code=${encodeURIComponent(requestCode)}`);
       }
     } catch (error) {
@@ -871,9 +1202,19 @@ export default function HomePage() {
   };
 
   const isTargeted = form.cv_type === "CV targeted to a specific job";
+  const coverLetterIncluded = shouldGenerateCoverLetter({
+    cv_type: form.cv_type,
+    target_role: form.target_role,
+    target_job_title: form.target_job_title,
+    company_name: form.company_name,
+    job_url: form.job_url,
+    job_description_text: form.job_description_text,
+  });
+  const cvLanguageCount = Math.max(Number(form.cv_language_count) || 1, form.selected_cv_languages.length);
+  const requestPrice = calculateRequestPrice(cvLanguageCount);
 
   return (
-    <main className="site-shell min-h-screen text-slate-900" dir={language === "ar" ? "rtl" : "ltr"}>
+    <main className={`site-shell min-h-screen text-slate-900${clientFlow ? " client-flow" : ""}`} lang={language} dir={language === "ar" ? "rtl" : "ltr"}>
       <header className="site-header sticky top-0 z-20">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3 md:px-8">
           <a href="#top" className="brand-lockup" aria-label="CVUp home">
@@ -914,7 +1255,7 @@ export default function HomePage() {
               {getText(language, "heroText")}
             </p>
             <div className="price-lockup mt-7">
-              <span className="price-amount">800 DA</span>
+              <span className="price-amount">{CVUP_BASE_PRICE_DZD} DA</span>
               <span className="price-arabic">800 دج</span>
               <span className="price-caption">{language === "ar" ? "سيرة ذاتية احترافية محسنة لطلبات التوظيف" : "CV professionnel optimisé pour vos candidatures"}</span>
             </div>
@@ -1050,6 +1391,19 @@ export default function HomePage() {
             <div className="wizard-main">
               <div className="wizard-heading"><span className="wizard-overline">{currentStep} / 7 · {Math.round((currentStep / 7) * 100)}%</span><h3 id="wizard-step-title" tabIndex={-1}>{stepTitle(wizardSteps[currentStep - 1])}</h3><p>{language === "ar" ? "أكمل هذه الخطوة ثم تابع عندما تكون جاهزًا." : language === "fr" ? "Complétez cette étape, puis continuez quand vous êtes prêt." : "Complete this step, then continue when you are ready."}</p></div>
               <form ref={formRef} className="wizard-form mt-8 space-y-6" onSubmit={handleSubmit} onInvalid={handleInvalidField} onInput={handleValidationInput} data-current-step={currentStep} noValidate>
+            {clientFlow && !editingRequestCode && draftReady ? <div role="status" className="rounded-2xl border border-emerald-200 bg-emerald-50/70 px-4 py-3 text-sm text-emerald-950">
+              <p className="font-semibold">{draftSaveStatus === "saved"
+                ? ui("تم حفظ طلبك كمسودة تلقائيًا.", "Votre demande est enregistrée automatiquement comme brouillon.", "Your request is being saved automatically as a draft.")
+                : draftSaveStatus === "error"
+                  ? ui("المسودة محفوظة على هذا الجهاز، تعذّر مزامنتها مع الحساب مؤقتًا.", "Le brouillon est conservé sur cet appareil, mais sa synchronisation a échoué.", "The draft is saved on this device, but could not sync to your account yet.")
+                  : ui("يُحفظ طلبك كمسودة تلقائيًا.", "Votre demande est enregistrée automatiquement comme brouillon.", "Your request is being saved automatically as a draft.")}</p>
+              {draftSavedAt ? <p className="mt-1 text-xs text-emerald-800">{ui("آخر حفظ", "Dernier enregistrement", "Last saved")}: {new Intl.DateTimeFormat(language === "ar" ? "ar-DZ" : language === "fr" ? "fr-FR" : "en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(draftSavedAt))}</p> : null}
+              {draftFilesToReselect.length ? <p className="mt-1 leading-6">{ui("تذكير: أعد اختيار الملفات المرفقة سابقًا؛ تحفظ المسودة النصوص والروابط ولا تحفظ محتوى الملفات المحلية.", "Rappel : sélectionnez à nouveau les fichiers choisis précédemment. Le brouillon conserve les textes et liens, pas les fichiers locaux.", "Reminder: reselect files chosen earlier. The draft keeps text and links, but not local file contents.")}</p> : null}
+            </div> : null}
+            {clientFlow && !editingRequestCode && hasReusableProfile && currentStep === 1 ? <div role="status" className="rounded-2xl border border-emerald-200 bg-emerald-50/70 px-5 py-4 text-sm text-emerald-950">
+              <p className="font-semibold">{ui("معلوماتك المحفوظة جاهزة للاستخدام", "Vos informations enregistrées sont prêtes à être réutilisées", "Your saved information is ready to reuse")}</p>
+              <p className="mt-1 leading-6">{ui("أكمل أو عدّل ما يلزم لهذا الطلب. التغييرات هنا تخص هذا الطلب فقط ولا تعدّل ملفك المحفوظ تلقائيًا.", "Complétez ou modifiez les informations nécessaires pour cette demande. Ces changements ne modifient pas votre profil enregistré.", "Change what is needed for this request. These edits apply to this request only and do not silently change your saved profile.")}</p>
+            </div> : null}
             <div data-wizard-step="1" className="grid gap-5 md:grid-cols-2">
               <label className="block">
                 <span className="mb-2 block text-sm font-medium text-slate-700">{getText(language, "formLanguage")}</span>
@@ -1073,7 +1427,7 @@ export default function HomePage() {
                   data-validation-kind="latin-name"
                   value={form.full_name}
                   onChange={(e) => handleFieldChange("full_name", e.target.value)}
-                  placeholder="Seif Eddine Charef"
+                  placeholder={ui("مثال: الاسم الكامل", "Ex. : prénom et nom", "e.g. Your full name")}
                   className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm outline-none focus:border-slate-500"
                 />
               </label>
@@ -1133,6 +1487,23 @@ export default function HomePage() {
               </label>
             </div>
 
+            <section data-wizard-step="1" className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 md:p-5">
+              <h4 className="font-semibold text-slate-900">{ui("معلومات شخصية اختيارية", "Informations personnelles facultatives", "Optional personal details")}</h4>
+              <p className="mt-1 text-sm text-slate-600">{ui("أدخلها عند رغبتك فقط، وحدد أدناه ما تريد إظهاره في السيرة الذاتية.", "Vous pouvez les renseigner si vous le souhaitez et choisir ci-dessous ce qui apparaîtra sur le CV.", "Add these only if you want to, then choose which details should appear on your CV.")}</p>
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <div>
+                  <label htmlFor="request-gender" className="mb-2 block text-sm font-medium text-slate-700">{ui("الجنس (اختياري)", "Genre (facultatif)", "Gender (optional)")}</label>
+                  <input id="request-gender" value={form.gender} onChange={(event) => handleFieldChange("gender", event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm outline-none focus:border-slate-500" />
+                  {form.gender.trim() ? <label className="mt-3 flex items-start gap-2 text-sm text-slate-700"><input type="checkbox" checked={form.include_gender_in_cv} onChange={(event) => handleFieldChange("include_gender_in_cv", event.target.checked)} /><span>{ui("أدرجه في السيرة الذاتية", "Inclure dans le CV", "Include on the CV")}</span></label> : null}
+                </div>
+                <div>
+                  <label htmlFor="request-birth-date" className="mb-2 block text-sm font-medium text-slate-700">{ui("تاريخ الميلاد (اختياري)", "Date de naissance (facultative)", "Date of birth (optional)")}</label>
+                  <input id="request-birth-date" type="date" value={form.date_of_birth} onChange={(event) => handleFieldChange("date_of_birth", event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm outline-none focus:border-slate-500" />
+                  {form.date_of_birth ? <label className="mt-3 flex items-start gap-2 text-sm text-slate-700"><input type="checkbox" checked={form.include_date_of_birth_in_cv} onChange={(event) => handleFieldChange("include_date_of_birth_in_cv", event.target.checked)} /><span>{ui("أدرجه في السيرة الذاتية", "Inclure dans le CV", "Include on the CV")}</span></label> : null}
+                </div>
+              </div>
+            </section>
+
             <div data-wizard-step="2">
               <span className="mb-3 block text-sm font-medium text-slate-700">{getText(language, "cvType")}</span>
               <div className="grid gap-3 md:grid-cols-2">
@@ -1150,6 +1521,11 @@ export default function HomePage() {
                   </label>
                 ))}
               </div>
+              <p className={`mt-3 rounded-xl px-4 py-3 text-sm leading-6 ${isTargeted ? "border border-emerald-200 bg-emerald-50 text-emerald-900" : "border border-slate-200 bg-slate-50 text-slate-700"}`}>
+                {isTargeted
+                  ? ui("السيرة الموجهة تُبنى على معلومات الوظيفة وخبرتك المؤكدة. عند توفر تفاصيل كافية، نرفق رسالة تحفيزية مخصصة دون تكلفة إضافية.", "Le CV ciblé s’appuie sur l’offre et votre expérience confirmée. Si le contexte est suffisant, une lettre personnalisée est incluse sans frais supplémentaires.", "A targeted CV uses the job details and your confirmed experience. When enough context is available, a tailored cover letter is included at no extra cost.")
+                  : ui("السيرة العامة غير مرتبطة بوظيفة أو شركة محددة، ولا تتضمن رسالة تحفيزية.", "Le CV général n’est lié à aucun poste ni entreprise précis et n’inclut pas de lettre de motivation.", "A general CV is not tied to a specific job or company and does not include a cover letter.")}
+              </p>
             </div>
 
             {isTargeted && (
@@ -1192,7 +1568,7 @@ export default function HomePage() {
                     <span className="mb-2 block text-sm font-medium text-slate-700">{getText(language, "uploadJobDescription")}</span>
                     <input
                       type="file"
-                      accept=".pdf,.doc,.docx,.txt"
+                      accept=".pdf,.docx,.txt"
                       onChange={(e) => handleFieldChange("job_description_file", e.target.files?.[0] ?? null)}
                       className="w-full rounded-xl border border-dashed border-slate-300 bg-white p-3 text-sm"
                     />
@@ -1214,6 +1590,7 @@ export default function HomePage() {
                   onChange={(e) => handleFieldChange("professional_field", e.target.value)}
                   className="w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm outline-none focus:border-slate-500"
                 >
+                  <option value="">{ui("اختر المجال المهني", "Choisissez un domaine professionnel", "Select a professional field")}</option>
                   {professionalFields.map((field) => (
                     <option key={field} value={field}>{optionLabel(field)}</option>
                   ))}
@@ -1268,6 +1645,7 @@ export default function HomePage() {
                   </label>
                 ))}
               </div>
+              <div className="review-price mt-4"><span>{language === "ar" ? `السعر النهائي · ${cvLanguageCount} لغات` : language === "fr" ? `Prix final · ${cvLanguageCount} langue(s)` : `Final price · ${cvLanguageCount} language(s)`}{coverLetterIncluded ? <small className="block font-medium">{language === "ar" ? "🎁 رسالة تحفيزية مخصصة هدية دون تكلفة إضافية" : language === "fr" ? "🎁 Lettre de motivation personnalisée offerte" : "🎁 Personalized cover letter included free"}</small> : null}</span><strong>{language === "ar" ? `${requestPrice} دج` : `${requestPrice} DA`}</strong></div>
               {form.selected_cv_languages.includes("Other") ? (
                 <input
                   value={form.selected_cv_languages_other}
@@ -1301,7 +1679,7 @@ export default function HomePage() {
                     <span className="mb-2 block text-sm font-medium text-slate-700">{getText(language, "uploadCurrentCv")}</span>
                     <input
                       type="file"
-                      accept=".pdf,.doc,.docx"
+                      accept=".pdf,.docx,.txt"
                       onChange={(e) => handleFieldChange("current_cv_file", e.target.files?.[0] ?? null)}
                       className="w-full rounded-xl border border-dashed border-slate-300 bg-white p-3 text-sm"
                     />
@@ -1544,18 +1922,26 @@ export default function HomePage() {
 
             <div data-wizard-step="5">
               <span className="mb-3 block text-sm font-medium text-slate-700">{getText(language, "languagesSpoken")}</span>
+              <p className="mb-3 text-sm leading-6 text-slate-600">
+                {ui("أدخل ثلاث لغات مختلفة على الأقل، وحدد مستواك في كل واحدة.", "Indiquez au moins trois langues différentes et votre niveau pour chacune.", "Add at least three different languages and select your level for each.")}
+              </p>
               <div className="space-y-3">
                 {form.spoken_languages.map((entry, index) => (
-                  <div key={`${entry.language}-${index}`} className="grid gap-3 md:grid-cols-2">
+                  <div key={`spoken-language-${index}`} className="grid gap-3 rounded-xl border border-slate-200 p-3 md:grid-cols-2">
                     <select
                       value={entry.language}
+                      required
+                      data-language-select="true"
+                      aria-label={ui(`اللغة رقم ${index + 1}`, `Langue ${index + 1}`, `Language ${index + 1}`)}
                       onChange={(e) => {
                         const next = [...form.spoken_languages];
                         next[index] = { ...next[index], language: e.target.value };
                         handleFieldChange("spoken_languages", next);
+                        setSpokenLanguageError(false);
                       }}
                       className="rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm outline-none focus:border-slate-500"
                     >
+                      <option value="">{ui("اختر اللغة", "Choisir une langue", "Select a language")}</option>
                       {[
                         "Arabic",
                         "French",
@@ -1570,24 +1956,30 @@ export default function HomePage() {
                     </select>
                     <select
                       value={entry.level}
+                      required
+                      aria-label={ui(`مستوى اللغة رقم ${index + 1}`, `Niveau de la langue ${index + 1}`, `Level for language ${index + 1}`)}
                       onChange={(e) => {
                         const next = [...form.spoken_languages];
                         next[index] = { ...next[index], level: e.target.value };
                         handleFieldChange("spoken_languages", next);
+                        setSpokenLanguageError(false);
                       }}
                       className="rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm outline-none focus:border-slate-500"
                     >
+                      <option value="">{ui("حدد المستوى", "Choisir un niveau", "Select a level")}</option>
                       {languageLevels.map((level) => (
                         <option key={level} value={level}>{optionLabel(level)}</option>
                       ))}
                     </select>
                     {entry.language === "Other" && (
                       <input
+                        required
                         value={entry.language_other}
                         onChange={(e) => {
                           const next = [...form.spoken_languages];
                           next[index] = { ...next[index], language_other: e.target.value };
                           handleFieldChange("spoken_languages", next);
+                          setSpokenLanguageError(false);
                         }}
                         placeholder={getText(language, "otherSpecify")}
                         className="rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm outline-none focus:border-slate-500"
@@ -1595,11 +1987,13 @@ export default function HomePage() {
                     )}
                     {entry.level === "Other" && (
                       <input
+                        required
                         value={entry.level_other}
                         onChange={(e) => {
                           const next = [...form.spoken_languages];
                           next[index] = { ...next[index], level_other: e.target.value };
                           handleFieldChange("spoken_languages", next);
+                          setSpokenLanguageError(false);
                         }}
                         placeholder={getText(language, "otherSpecify")}
                         className="rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm outline-none focus:border-slate-500"
@@ -1617,11 +2011,24 @@ export default function HomePage() {
                       />
                       <span>{getText(language, "professionalWriting")}</span>
                     </label>
+                    {form.spoken_languages.length > 3 && <button
+                      type="button"
+                      onClick={() => {
+                        handleFieldChange("spoken_languages", form.spoken_languages.filter((_, itemIndex) => itemIndex !== index));
+                        setSpokenLanguageError(false);
+                      }}
+                      className="justify-self-start rounded-full px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50"
+                    >
+                      {ui("حذف اللغة", "Supprimer cette langue", "Remove language")}
+                    </button>}
                   </div>
                 ))}
+                {spokenLanguageError && <p role="alert" className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                  {ui("يرجى إدخال ثلاث لغات مختلفة على الأقل وتحديد مستوى كل لغة.", "Veuillez indiquer au moins trois langues différentes et choisir le niveau de chacune.", "Please enter at least three different languages and choose a level for each.")}
+                </p>}
                 <button
                   type="button"
-                  onClick={() => handleFieldChange("spoken_languages", [...form.spoken_languages, { language: "Arabic", level: "Intermediate", professional_writing: false, language_other: "", level_other: "" }])}
+                  onClick={() => handleFieldChange("spoken_languages", [...form.spoken_languages, createEmptySpokenLanguage()])}
                   className="rounded-full border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700"
                 >
                   <span aria-hidden="true">+</span> {getText(language, "addLanguage")}
@@ -1655,13 +2062,36 @@ export default function HomePage() {
                     placeholder={language === "ar" ? "اسم الشهادة أو التكوين" : language === "fr" ? "Nom de la certification ou de la formation" : "Certification or training name"}
                     className="w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm outline-none focus:border-slate-500"
                   />
-                  <div>
-                    <input
-                      type="file"
-                      accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp"
-                      onChange={(e) => handleFieldChange("certifications_file", e.target.files?.[0] ?? null)}
-                      className="w-full rounded-xl border border-dashed border-slate-300 bg-white p-3 text-sm"
-                    />
+                  <div className="rounded-2xl border border-dashed border-emerald-200 bg-emerald-50/40 p-4">
+                    <p className="text-sm font-semibold text-slate-800">
+                      {ui("أو حمّل ملف الشهادة أو إثبات التكوين", "Ou téléversez le justificatif de formation ou le certificat", "Or upload the certificate or training proof")}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-600">
+                      {ui("اختياري — PDF أو DOCX أو TXT أو صورة", "Facultatif — PDF, DOCX, TXT ou image", "Optional — PDF, DOCX, TXT, or image")}
+                    </p>
+                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                      <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-emerald-200 bg-white px-4 py-3 text-sm font-semibold text-emerald-900 transition hover:bg-emerald-50 focus-within:ring-2 focus-within:ring-emerald-300">
+                        <span aria-hidden="true">↑</span>
+                        {ui("اختيار ملف", "Choisir un fichier", "Choose a file")}
+                        <input
+                          type="file"
+                          accept=".pdf,.docx,.txt,.jpg,.jpeg,.png,.webp"
+                          aria-label={ui("ملف الشهادة أو إثبات التكوين", "Fichier du certificat ou justificatif de formation", "Certificate or training proof file")}
+                          onChange={(e) => handleFieldChange("certifications_file", e.target.files?.[0] ?? null)}
+                          className="sr-only"
+                        />
+                      </label>
+                      <span className="min-w-0 break-all text-sm text-slate-700">
+                        {form.certifications_file?.name || existingFileNames.certifications_file || ui("لم يتم اختيار ملف", "Aucun fichier choisi", "No file selected")}
+                      </span>
+                      {form.certifications_file && <button
+                        type="button"
+                        onClick={() => handleFieldChange("certifications_file", null)}
+                        className="rounded-full px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50"
+                      >
+                        {ui("إزالة", "Retirer", "Remove")}
+                      </button>}
+                    </div>
                     {fileLimitHint()}
                   </div>
                   <input
@@ -1695,7 +2125,7 @@ export default function HomePage() {
                   <div>
                     <input
                       type="file"
-                      accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp"
+                      accept=".pdf,.docx,.txt,.jpg,.jpeg,.png,.webp"
                       onChange={(e) => handleFieldChange("cv_template_file", e.target.files?.[0] ?? null)}
                       className="w-full rounded-xl border border-dashed border-slate-300 bg-white p-3 text-sm"
                     />
@@ -1785,8 +2215,15 @@ export default function HomePage() {
             ) : null}
 
             <div data-wizard-step="7" className="review-grid">
-              {reviewGroups.map((group) => <section key={group.step} className="review-card"><div className="review-card__heading"><h4>{group.title}</h4><button type="button" onClick={() => editReviewStep(group.step)}>{language === "ar" ? "تعديل" : language === "fr" ? "Modifier" : "Edit"}</button></div>{group.values.map(([label, value]) => <div key={String(label)} className="review-row"><span>{label}</span><strong>{reviewValue(value)}</strong></div>)}</section>)}
-              <div className="review-price"><span>{language === "ar" ? "السعر النهائي" : language === "fr" ? "Prix final" : "Final price"}</span><strong>{language === "ar" ? "800 دج" : "800 DA"}</strong></div>
+              {isTargetedCv && !coverLetterIncluded ? <p role="note" className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">{ui("لتحضير رسالة تحفيزية مخصصة، أضف عنوان الوظيفة أو وصفها أو رابط الإعلان. لن نختلق معلومات غير متوفرة.", "Pour préparer une lettre personnalisée, ajoutez l’intitulé, la description ou le lien de l’offre. Nous n’inventerons aucune information manquante.", "To prepare a tailored cover letter, add the job title, description, or listing link. We will not invent missing information.")}</p> : null}
+              {reviewGroups.map((group) => {
+                const values = group.values.filter(([, value]) => hasReviewValue(value));
+                return <section key={group.step} className="review-card">
+                  <div className="review-card__heading"><h4>{group.title}</h4><button type="button" onClick={() => editReviewStep(group.step)}>{language === "ar" ? "تعديل" : language === "fr" ? "Modifier" : "Edit"}</button></div>
+                  {values.length ? values.map(([label, value]) => <div key={String(label)} className="review-row"><span>{label}</span><strong>{reviewValue(value)}</strong></div>) : <p className="pt-3 text-sm text-slate-500">{ui("لم تُضف معلومات في هذا القسم بعد.", "Aucune information n’a encore été ajoutée à cette section.", "No information has been added to this section yet.")}</p>}
+                </section>;
+              })}
+              <div className="review-price"><span>{language === "ar" ? "السعر النهائي" : language === "fr" ? "Prix final" : "Final price"}{` · ${cvLanguageCount} ${language === "ar" ? "لغات" : language === "fr" ? "langue(s)" : "language(s)"}`}{coverLetterIncluded ? <small className="block font-medium">{language === "ar" ? "🎁 رسالة تحفيزية مخصصة هدية دون تكلفة إضافية" : language === "fr" ? "🎁 Lettre de motivation personnalisée offerte" : "🎁 Personalized cover letter included free"}</small> : null}</span><strong>{language === "ar" ? `${requestPrice} دج` : `${requestPrice} DA`}</strong></div>
             </div>
 
             <label data-wizard-step="7" className="flex items-start gap-3 rounded-2xl border border-slate-200 p-4 text-sm text-slate-700">
@@ -1799,7 +2236,7 @@ export default function HomePage() {
               <span>{getText(language, "finalConsent")}</span>
             </label>
 
-            {status && <p data-wizard-step="7" className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800">{status}</p>}
+            {status && <p role="status" className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800">{status}</p>}
 
             <button
               data-wizard-step="7"

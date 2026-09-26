@@ -3,6 +3,9 @@ import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { getSupabaseServerClient } from "@/lib/supabase";
 import { assertRequestSubmissionTokenConfigured, createRequestSubmissionToken } from "@/lib/request-submission-token";
+import { calculateRequestPrice } from "@/lib/pricing";
+import { shouldGenerateCoverLetter } from "@/lib/request-deliverables";
+import { hasAtLeastThreeDistinctSpokenLanguages } from "@/lib/spoken-languages";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -81,9 +84,30 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: "Invalid form language." }, { status: 400 });
     }
 
+    if (!hasAtLeastThreeDistinctSpokenLanguages(payload.spoken_languages)) {
+      const error = formLanguage === "ar"
+        ? "أدخل ثلاث لغات مختلفة على الأقل وحدد مستوى كل لغة."
+        : formLanguage === "fr"
+          ? "Indiquez au moins trois langues différentes et leur niveau."
+          : "Enter at least three different languages and select a level for each.";
+      return NextResponse.json({ success: false, error }, { status: 400 });
+    }
+
     if (!["General CV", "CV targeted to a specific job"].includes(cvType)) {
       return NextResponse.json({ success: false, error: "Invalid CV type." }, { status: 400 });
     }
+
+    const cvLanguageCount = Number(payload.cv_language_count ?? 1);
+    if (![1, 2, 3].includes(cvLanguageCount)) {
+      return NextResponse.json({ success: false, error: "Invalid CV language count." }, { status: 400 });
+    }
+    const selectedCvLanguages: string[] = Array.isArray(payload.selected_cv_languages)
+      ? Array.from(new Set<string>(payload.selected_cv_languages.filter((value: unknown): value is string => typeof value === "string").map((value: string) => value.trim()).filter(Boolean))).slice(0, 3)
+      : [];
+    if (selectedCvLanguages.length > cvLanguageCount || selectedCvLanguages.some((value) => value.length > 80)) {
+      return NextResponse.json({ success: false, error: "Selected CV languages do not match the requested version count." }, { status: 400 });
+    }
+    const priceDzd = calculateRequestPrice(Math.max(cvLanguageCount, selectedCvLanguages.length));
 
     if (payload.final_consent !== true) {
       return NextResponse.json({ success: false, error: "Final consent is required." }, { status: 400 });
@@ -105,7 +129,8 @@ export async function POST(request: Request) {
     }
 
     const requestCode = generateRequestCode();
-    const rawPayload = { ...payload, full_name_arabic: fullNameArabic };
+    const coverLetterIncluded = shouldGenerateCoverLetter(payload);
+    const rawPayload = { ...payload, full_name_arabic: fullNameArabic, price_dzd: priceDzd, cover_letter_included: coverLetterIncluded };
     delete rawPayload.website;
 
     const supportingMaterials = Array.isArray(payload.supporting_materials)
@@ -145,8 +170,8 @@ export async function POST(request: Request) {
       job_description_text: payload.job_description_text ?? null,
       professional_field: payload.professional_field ?? null,
       target_role: payload.target_role ?? null,
-      cv_language_count: Number(payload.cv_language_count ?? 1),
-      selected_cv_languages: Array.isArray(payload.selected_cv_languages) ? payload.selected_cv_languages : [],
+      cv_language_count: cvLanguageCount,
+      selected_cv_languages: selectedCvLanguages,
       has_current_cv: payload.has_current_cv === true || payload.has_current_cv === "Yes",
       current_cv_file_path: null,
       current_cv_file_name: null,
@@ -204,6 +229,8 @@ export async function POST(request: Request) {
         id: data.id,
         request_code: data.request_code,
         submission_token: submissionToken,
+        price_dzd: priceDzd,
+        cover_letter_included: coverLetterIncluded,
       },
       { status: 201, headers: { "Cache-Control": "no-store" } }
     );
