@@ -164,7 +164,9 @@ export default function Login() {
           onClick={continueWithGoogle}
           className="mt-8 flex min-h-13 w-full items-center justify-center gap-3 rounded-full border border-slate-300 bg-white px-5 py-3.5 font-semibold transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-55"
         >
-          <GoogleIcon /> {t.google}
+          <GoogleIcon />
+          <span>{t.google}</span>
+          <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-bold text-emerald-800">{language === "ar" ? "فوري وموصى به" : "Rapide"}</span>
         </button>
 
         <div className="my-7 flex items-center gap-3 text-xs uppercase tracking-[.14em] text-slate-400">
@@ -199,7 +201,25 @@ export default function Login() {
             />
           </label>
 
-          {message ? <p role="alert" className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">{message}</p> : null}
+          {message ? (
+            <div className="mt-4 space-y-2">
+              <p role="alert" className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">{message}</p>
+              {message === t.unverified ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-900">
+                  <p className="font-semibold">{language === "ar" ? "💡 لم يصلك بريد التفعيل؟" : "💡 Pas d'e-mail de confirmation ?"}</p>
+                  <p className="mt-1">{language === "ar" ? "يمكنك تسجيل الدخول مباشرة بضغطة واحدة بحساب Google دون انتظار البريد:" : "Connectez-vous immédiatement avec Google sans attendre :"}</p>
+                  <button
+                    type="button"
+                    onClick={continueWithGoogle}
+                    className="mt-2 flex w-full items-center justify-center gap-2 rounded-full border border-slate-300 bg-white py-2 text-xs font-bold text-slate-800 shadow-sm hover:bg-slate-50"
+                  >
+                    <GoogleIcon />
+                    <span>{t.google}</span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
 
           <button
             disabled={checking || submitting}

@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
+import type { User } from "@supabase/supabase-js";
 import {
   professionalFields,
   commonToolsByField,
@@ -158,6 +160,7 @@ export default function HomePage() {
   const [form, setForm] = useState(initialForm);
   const [status, setStatus] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [showFloatingCta, setShowFloatingCta] = useState(true);
   const [clientFlow, setClientFlow] = useState(false);
   const [hasReusableProfile, setHasReusableProfile] = useState(false);
@@ -208,7 +211,8 @@ export default function HomePage() {
     (async () => {
       const params = new URLSearchParams(window.location.search);
       const editCode = params.get("edit");
-      const isAccountRequest = ["1", "profile"].includes(params.get("new") || "") || Boolean(editCode);
+      const isTargetFastFlow = params.get("new") === "target" || params.get("target") === "1" || params.get("flow") === "target";
+      const isAccountRequest = ["1", "profile", "target"].includes(params.get("new") || "") || Boolean(editCode) || isTargetFastFlow;
       setClientFlow(isAccountRequest);
 
       const flowLanguage: LanguageCode = getSavedClientLanguage();
@@ -221,9 +225,10 @@ export default function HomePage() {
 
       const supabase = getSupabaseBrowserClient();
       const { data: { user } } = await supabase.auth.getUser();
+      setCurrentUser(user || null);
 
       if (isAccountRequest && !user) {
-        const next = editCode ? `/?edit=${encodeURIComponent(editCode)}#form` : "/?new=1#form";
+        const next = editCode ? `/?edit=${encodeURIComponent(editCode)}#form` : isTargetFastFlow ? "/?new=target#form" : "/?new=1#form";
         window.location.replace(`/account/login?next=${encodeURIComponent(next)}`);
         return;
       }
@@ -391,7 +396,14 @@ export default function HomePage() {
       }
 
       if (isAccountRequest) {
-        if (!requestDraft) setCurrentStep(1);
+        if (!requestDraft) {
+          if (isTargetFastFlow || params.get("new") === "target") {
+            setCurrentStep(2);
+            setForm((current) => ({ ...current, cv_type: "CV targeted to a specific job" }));
+          } else {
+            setCurrentStep(1);
+          }
+        }
         window.requestAnimationFrame(() => document.getElementById("form")?.scrollIntoView({ behavior: "smooth", block: "start" }));
       }
     })();
@@ -641,6 +653,12 @@ export default function HomePage() {
     setReviewEditStep(step);
     setCurrentStep(step);
     document.getElementById("form")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function jumpToReview() {
+    if (!validateCurrentStep()) return;
+    setCurrentStep(7);
+    window.requestAnimationFrame(() => document.getElementById("form")?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
 
   const reviewValue = (value: unknown) => {
@@ -1222,6 +1240,23 @@ export default function HomePage() {
             <span className="brand-word">CVUp</span>
           </a>
           <div className="header-actions">
+            {currentUser ? (
+              <Link
+                href="/account"
+                className="header-account-btn inline-flex items-center gap-1.5 rounded-full border border-emerald-600/30 bg-emerald-50 px-3.5 py-1.5 text-xs font-bold text-emerald-800 transition hover:bg-emerald-100"
+              >
+                <span aria-hidden="true">👤</span>
+                <span>{language === "ar" ? "مساحة العميل" : language === "fr" ? "Mon Espace" : "My Account"}</span>
+              </Link>
+            ) : (
+              <Link
+                href="/account/login"
+                className="header-login-btn inline-flex items-center gap-1 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:border-slate-500 hover:text-slate-900"
+              >
+                <span aria-hidden="true">🔑</span>
+                <span>{language === "ar" ? "تسجيل الدخول" : language === "fr" ? "Connexion" : "Sign in"}</span>
+              </Link>
+            )}
             <a className="header-contact hidden sm:inline-flex" href="https://wa.me/213794851081" target="_blank" rel="noreferrer">WhatsApp</a>
             <div className="language-switcher">
             {languages.map((item) => (
@@ -1266,6 +1301,15 @@ export default function HomePage() {
               >
                 {getText(language, "ctaPrimary")}
               </a>
+              {currentUser || hasReusableProfile ? (
+                <Link
+                  href="/?new=target#form"
+                  className="button-contact inline-flex items-center justify-center gap-1.5 border-emerald-600/40 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+                >
+                  <span aria-hidden="true">⚡</span>
+                  <span>{language === "ar" ? "سيرة جديدة بالوصف الوظيفي" : language === "fr" ? "Nouveau CV ciblé" : "Fast Targeted CV"}</span>
+                </Link>
+              ) : null}
               <a className="button-contact button-whatsapp" href="https://wa.me/213794851081" target="_blank" rel="noreferrer"><span aria-hidden="true">W</span>{language === "ar" ? "تواصل عبر واتساب" : "Contact WhatsApp"}</a>
               <a className="button-contact" href="tel:+213794851081"><span aria-hidden="true">☎</span>{language === "ar" ? "اتصل الآن" : "Appeler maintenant"}</a>
             </div>
@@ -1385,7 +1429,7 @@ export default function HomePage() {
             <nav className="wizard-sidebar" aria-label="Form steps">
               {wizardSteps.map((step, index) => {
                 const number = index + 1;
-                return <button key={step.en} type="button" className={`wizard-step-link ${number === currentStep ? "is-current" : ""} ${number < currentStep ? "is-complete" : ""}`} aria-current={number === currentStep ? "step" : undefined} onClick={() => number <= currentStep && setCurrentStep(number)}><span className="wizard-step-number">{number < currentStep ? "✓" : `0${number}`}</span><span>{stepTitle(step)}</span></button>;
+                return <button key={step.en} type="button" className={`wizard-step-link ${number === currentStep ? "is-current" : ""} ${number < currentStep ? "is-complete" : ""}`} aria-current={number === currentStep ? "step" : undefined} onClick={() => (hasReusableProfile || number <= currentStep) && setCurrentStep(number)}><span className="wizard-step-number">{number < currentStep ? "✓" : `0${number}`}</span><span>{stepTitle(step)}</span></button>;
               })}
             </nav>
             <div className="wizard-main">
@@ -1503,6 +1547,28 @@ export default function HomePage() {
                 </div>
               </div>
             </section>
+
+            {hasReusableProfile ? (
+              <div data-wizard-step="2" className="rounded-2xl border-2 border-emerald-300 bg-emerald-50/80 p-4 md:p-5 text-emerald-950">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="font-bold">
+                      {ui("⚡ بياناتك وخبراتك السابقة محفوظة ومعبأة مسبقاً!", "⚡ Vos informations de profil sont déjà pré-remplies !", "⚡ Your profile info and experiences are already pre-filled!")}
+                    </p>
+                    <p className="mt-1 text-xs text-emerald-800">
+                      {ui("أدخل مسمى الوظيفة والوصف الوظيفي أدناه، ثم يمكنك القفز مباشرة للمراجعة وتأكيد الطلب.", "Renseignez le poste et la description ci-dessous, puis passez directement à la révision.", "Enter the job title and description below, then jump straight to review.")}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={jumpToReview}
+                    className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl bg-emerald-700 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition hover:bg-emerald-800"
+                  >
+                    <span>{ui("⚡ تخطي للمراجعة وتأكيد الطلب ➔", "⚡ Passer directement à la révision ➔", "⚡ Skip to Review & Submit ➔")}</span>
+                  </button>
+                </div>
+              </div>
+            ) : null}
 
             <div data-wizard-step="2">
               <span className="mb-3 block text-sm font-medium text-slate-700">{getText(language, "cvType")}</span>
@@ -2251,7 +2317,15 @@ export default function HomePage() {
                   : getText(language, "submit")}
             </button>
           </form>
-              <div className="wizard-controls"><button type="button" className="wizard-control wizard-control--back" onClick={() => moveStep(-1)} disabled={currentStep === 1}>{language === "ar" ? "السابق" : language === "fr" ? "Précédent" : "Back"}</button>{currentStep < 7 ? <button type="button" className="wizard-control wizard-control--next" onClick={() => moveStep(1)}>{reviewEditStep === currentStep ? (language === "ar" ? "حفظ والعودة للمراجعة" : language === "fr" ? "Enregistrer et revenir à la vérification" : "Save and return to review") : (language === "ar" ? "التالي" : language === "fr" ? "Continuer" : "Continue")}</button> : null}</div>
+              <div className="wizard-controls">
+                <button type="button" className="wizard-control wizard-control--back" onClick={() => moveStep(-1)} disabled={currentStep === 1}>{language === "ar" ? "السابق" : language === "fr" ? "Précédent" : "Back"}</button>
+                {hasReusableProfile && currentStep < 7 ? (
+                  <button type="button" className="wizard-control wizard-control--jump font-semibold text-emerald-800" onClick={jumpToReview}>
+                    {language === "ar" ? "⚡ تخطي للمراجعة (7/7)" : language === "fr" ? "⚡ Vérification directe (7/7)" : "⚡ Skip to Review (7/7)"}
+                  </button>
+                ) : null}
+                {currentStep < 7 ? <button type="button" className="wizard-control wizard-control--next" onClick={() => moveStep(1)}>{reviewEditStep === currentStep ? (language === "ar" ? "حفظ والعودة للمراجعة" : language === "fr" ? "Enregistrer et revenir à la vérification" : "Save and return to review") : (language === "ar" ? "التالي" : language === "fr" ? "Continuer" : "Continue")}</button> : null}
+              </div>
             </div>
           </div>
         </div>

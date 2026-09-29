@@ -181,6 +181,13 @@ export default function AccountPage() {
   }, []);
 
   useEffect(() => {
+    const action = searchParams.get("action");
+    if (action === "previous" || action === "edit") {
+      setShowPrevious(true);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
     if (!showPrevious) return;
     const dialog = previousDialogRef.current;
     const focusableSelector = "button, a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])";
@@ -256,7 +263,17 @@ export default function AccountPage() {
           <h1 className="mt-2 text-3xl font-bold tracking-tight">{t.welcome}{profile?.full_name_latin ? `, ${profile.full_name_latin.split(" ")[0]}` : ""}</h1>
           <p className="mt-1 text-sm text-slate-500">{t.dashboardOverview}</p>
           {updatedSummary ? <div role="status" className="mt-5 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950"><p className="font-bold">{t.updated} · {updatedSummary.languages} {t.languageVersions}</p><p className="mt-1">{t.finalPrice}: <strong>{updatedSummary.price} DZD</strong></p>{updatedSummary.targeted ? <p className="mt-1">🎁 {t.targetedGift}</p> : null}</div> : null}
-          <div className="mt-6 flex flex-wrap gap-3"><Link href="/?new=1#form" className="rounded-full bg-[#102019] px-6 py-3 text-sm font-bold text-white">{t.newCv}</Link><button ref={previousTriggerRef} type="button" onClick={() => setShowPrevious(true)} className="rounded-full border border-slate-300 bg-white px-6 py-3 text-sm font-bold transition hover:bg-slate-50">{t.editPrevious}</button></div>
+          <div className="mt-6 flex flex-wrap gap-3">
+            <Link href="/?new=target#form" className="rounded-full bg-[#102019] px-6 py-3 text-sm font-bold text-white shadow-sm hover:bg-[#183126]">
+              ⚡ {language === "ar" ? "سيرة جديدة بالوصف الوظيفي (سريع)" : language === "fr" ? "Nouveau CV ciblé (Job Description)" : "Targeted CV (Job Description)"}
+            </Link>
+            <Link href="/?new=1#form" className="rounded-full border border-slate-300 bg-white px-5 py-3 text-sm font-bold transition hover:bg-slate-50">
+              {language === "ar" ? "سيرة كاملة من البداية" : language === "fr" ? "Nouveau CV complet" : "Full CV from scratch"}
+            </Link>
+            <button ref={previousTriggerRef} type="button" onClick={() => setShowPrevious(true)} className="rounded-full border border-slate-300 bg-white px-5 py-3 text-sm font-bold transition hover:bg-slate-50">
+              ✏️ {t.editPrevious}
+            </button>
+          </div>
           {draft ? <div className="mt-5 rounded-2xl border border-emerald-200 bg-emerald-50/70 p-4"><div className="flex flex-wrap items-center justify-between gap-4"><div><p className="font-bold">{t.currentDraft}: {savedDraftTitle}</p><p className="mt-1 text-sm text-slate-600">{t.draftProgress} · {draftProgress}%{savedDraftAt ? ` · ${dateLabel(savedDraftAt)}` : ""}</p></div><Link href="/?new=1#form" className="rounded-full bg-[#102019] px-5 py-2.5 text-sm font-bold text-white">{t.continueDraft}</Link></div><div className="mt-3 h-2 overflow-hidden rounded-full bg-white"><span className="block h-full rounded-full bg-emerald-500" style={{ width: `${draftProgress}%` }} /></div></div> : null}
         </section>
         <section className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

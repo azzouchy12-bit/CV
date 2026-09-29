@@ -149,6 +149,16 @@ export default function Register() {
       return;
     }
 
+    // Try immediate sign-in with password in case email confirmation is not enforced
+    const { data: signInData } = await getSupabaseBrowserClient().auth.signInWithPassword({
+      email: normalizedEmail,
+      password,
+    });
+    if (signInData?.session) {
+      window.location.replace(next);
+      return;
+    }
+
     setPendingEmail(normalizedEmail);
     setPassword("");
     setVerifiedState(true);
@@ -206,6 +216,31 @@ export default function Register() {
             >
               {submitting ? t.resending : t.resend}
             </button>
+            <div className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50/70 p-4 text-xs leading-5 text-emerald-950">
+              <p className="font-bold">
+                {language === "ar"
+                  ? "💡 لم تصلك رسالة التأكيد؟"
+                  : language === "fr"
+                    ? "💡 L'e-mail de confirmation tarde à arriver ?"
+                    : "💡 Didn't receive the confirmation email?"}
+              </p>
+              <p className="mt-1">
+                {language === "ar"
+                  ? "يمكنك الدخول فوراً بضغطة واحدة باستخدام حساب Google دون الحاجة لانتظار بريد التفعيل:"
+                  : language === "fr"
+                    ? "Vous pouvez vous connecter immédiatement en un clic avec votre compte Google sans attendre d'e-mail :"
+                    : "You can sign in immediately with your Google account without waiting for an email:"}
+              </p>
+              <button
+                type="button"
+                onClick={continueWithGoogle}
+                disabled={submitting}
+                className="mt-3 flex min-h-11 w-full items-center justify-center gap-2 rounded-full border border-slate-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-800 shadow-sm transition hover:bg-slate-50 disabled:opacity-50"
+              >
+                <GoogleIcon />
+                <span>{language === "ar" ? "المتابعة الفورية عبر Google" : language === "fr" ? "Continuer avec Google" : "Continue with Google"}</span>
+              </button>
+            </div>
             <button
               type="button"
               onClick={() => { setVerifiedState(false); setMessage(""); setEmail(pendingEmail); }}
@@ -228,7 +263,9 @@ export default function Register() {
               onClick={continueWithGoogle}
               className="mt-8 flex min-h-13 w-full items-center justify-center gap-3 rounded-full border border-slate-300 bg-white px-5 py-3.5 font-semibold transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-55"
             >
-              <GoogleIcon /> {t.google}
+              <GoogleIcon />
+              <span>{t.google}</span>
+              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-bold text-emerald-800">{language === "ar" ? "فوري وموصى به" : "Rapide"}</span>
             </button>
 
             <div className="my-7 flex items-center gap-3 text-xs uppercase tracking-[.14em] text-slate-400">
