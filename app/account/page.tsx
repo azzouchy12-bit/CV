@@ -183,7 +183,7 @@ export default function AccountPage() {
   useEffect(() => {
     const action = searchParams.get("action");
     if (action === "previous" || action === "edit") {
-      setShowPrevious(true);
+      queueMicrotask(() => setShowPrevious(true));
     }
   }, [searchParams]);
 

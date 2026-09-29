@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
 const net = require("net");
 const { spawn } = require("child_process");
 
